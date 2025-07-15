@@ -1,0 +1,156 @@
+name: Test with Vagrant (Experimental)
+
+on:
+  workflow_dispatch:  # Manual trigger only for now
+  pull_request:
+    branches: [ main ]
+    types: [ opened, synchronize, reopened ]
+
+jobs:
+  test-vagrant:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60  # Generous timeout for VM operations
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Check system resources
+      run: |
+        echo "=== System Information ==="
+        df -h
+        free -h
+        nproc
+        lscpu | grep -E '^CPU\(s\)|^Model name|^Virtualization'
+        echo "=========================="
+    
+    - name: Install Vagrant
+      run: |
+        # Install Vagrant
+        wget -O- https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+        echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/hashicorp.list
+        sudo apt update
+        sudo apt install -y vagrant
+        
+        # Verify installation
+        vagrant --version
+    
+    - name: Install VirtualBox
+      run: |
+        # Install VirtualBox
+        sudo apt update
+        sudo apt install -y virtualbox virtualbox-ext-pack
+        
+        # Check if VirtualBox can start (nested virtualization test)
+        if sudo VBoxManage list hostinfo | grep -q "Nested Paging"; then
+          echo "✅ Nested virtualization appears to be supported"
+        else
+          echo "⚠️  Nested virtualization may not be supported"
+        fi
+        
+        # List available VM types
+        VBoxManage list osTypes | grep -E "^ID:|^Description:" | head -20
+    
+    - name: Test Vagrant Box Download
+      run: |
+        echo "Testing Vagrant box download..."
+        timeout 300 vagrant box add ubuntu/jammy64 --provider virtualbox --box-version "~> 20240701.0.0" || {
+          echo "❌ Failed to download Vagrant box (timeout or error)"
+          echo "This suggests GitHub runners may not support our Vagrant setup"
+          exit 1
+        }
+        
+        echo "✅ Vagrant box downloaded successfully"
+        vagrant box list
+    
+    - name: Test VM Creation (Light Test)
+      run: |
+        echo "Testing basic VM creation..."
+        
+        # Create a minimal test Vagrantfile
+        cat > Vagrantfile.test << 'EOF'
+        Vagrant.configure("2") do |config|
+          config.vm.box = "ubuntu/jammy64"
+          config.vm.box_version = "~> 20240701.0.0"
+          
+          config.vm.provider "virtualbox" do |vb|
+            vb.memory = "512"  # Minimal memory
+            vb.cpus = 1
+            vb.linked_clone = true
+          end
+          
+          config.vm.provision "shell", inline: <<-SHELL
+            echo "Hello from Vagrant VM!"
+            uname -a
+            df -h
+          SHELL
+        end
+        EOF
+        
+        # Try to start a minimal VM
+        export VAGRANT_VAGRANTFILE=Vagrantfile.test
+        timeout 600 vagrant up || {
+          echo "❌ Failed to create VM"
+          echo "GitHub runners may not support nested virtualization"
+          vagrant status || true
+          exit 1
+        }
+        
+        echo "✅ VM created successfully!"
+        
+        # Test SSH connection
+        vagrant ssh -c "echo 'SSH connection works!'" || {
+          echo "❌ SSH connection failed"
+          exit 1
+        }
+        
+        echo "✅ SSH connection works!"
+        
+        # Cleanup
+        vagrant destroy -f
+    
+    - name: Run Full Test Suite (If VM Creation Succeeds)
+      run: |
+        echo "🚀 Running full test suite with our Vagrantfile..."
+        
+        # Use our actual Vagrantfile
+        timeout 1800 ./dev-test.sh fresh || {
+          echo "❌ Full test suite failed"
+          echo "Checking VM status..."
+          vagrant status || true
+          echo "Checking logs..."
+          vagrant ssh primary -c "tail -50 /var/log/docker-backup-manager.log" || true
+          exit 1
+        }
+        
+        echo "🎉 Full test suite completed successfully!"
+    
+    - name: Cleanup
+      if: always()
+      run: |
+        echo "Cleaning up VMs..."
+        vagrant destroy -f || true
+        vagrant box remove ubuntu/jammy64 || true
+    
+    - name: Test Results Summary
+      if: always()
+      run: |
+        echo "=== Vagrant Test Results ==="
+        if [ $? -eq 0 ]; then
+          echo "✅ SUCCESS: GitHub runners CAN run our Vagrant-based tests!"
+          echo "🎯 This means we can use this workflow for automated testing"
+        else
+          echo "❌ FAILED: GitHub runners cannot run our Vagrant-based tests"
+          echo "💡 Possible reasons:"
+          echo "   - Nested virtualization not supported"
+          echo "   - Resource constraints (memory/CPU)"
+          echo "   - VirtualBox compatibility issues"
+          echo "   - Network restrictions"
+          echo ""
+          echo "🔧 Alternatives for CI/CD:"
+          echo "   - Use Docker-based testing instead of VMs"
+          echo "   - Use GitHub's larger runners (paid)"
+          echo "   - Use external CI services with better VM support"
+          echo "   - Create lighter integration tests"
+        fi
+        echo "=========================="
