@@ -37,9 +37,18 @@ jobs:
     
     - name: Install VirtualBox
       run: |
-        # Install VirtualBox
+        # Install VirtualBox (without ext-pack to avoid license acceptance issues)
         sudo apt update
-        sudo apt install -y virtualbox virtualbox-ext-pack
+        sudo apt install -y virtualbox
+        
+        # Pre-accept VirtualBox Extension Pack license
+        echo "virtualbox-ext-pack virtualbox-ext-pack/license select true" | sudo debconf-set-selections
+        
+        # Now install the extension pack
+        sudo apt install -y virtualbox-ext-pack
+        
+        # Ensure VirtualBox kernel modules are loaded
+        sudo modprobe vboxdrv || echo "⚠️  VirtualBox kernel module not available (expected in some CI environments)"
         
         # Check if VirtualBox can start (nested virtualization test)
         if sudo VBoxManage list hostinfo | grep -q "Nested Paging"; then
