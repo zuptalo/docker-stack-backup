@@ -58,16 +58,25 @@ cleanup_vms() {
 start_vms() {
     info "Starting VM environment..."
     
-    # Bring up both VMs
+    # Simple approach - just run vagrant up
     vagrant up
     
     success "VM environment is ready"
 }
 
 stop_vms() {
-    info "Stopping VMs..."
-    vagrant halt
-    success "VMs stopped"
+    info "Suspending VMs (faster than halt)..."
+    vagrant suspend
+    success "VMs suspended"
+}
+
+resume_vms() {
+    info "Resuming VM environment..."
+    
+    # Simple approach - just run vagrant resume
+    vagrant resume
+    
+    success "VM environment is ready"
 }
 
 show_vm_status() {
@@ -89,39 +98,27 @@ show_vm_status() {
     info "- Remote IP: 192.168.56.11"
 }
 
-# Check if VMs are running
-check_vm_status() {
-    local primary_status=$(vagrant status primary | grep primary | awk '{print $2}')
-    local remote_status=$(vagrant status remote | grep remote | awk '{print $2}')
-    
-    if [[ "$primary_status" == "running" && "$remote_status" == "running" ]]; then
-        return 0  # Both VMs running
-    elif [[ "$primary_status" == "running" || "$remote_status" == "running" ]]; then
-        return 1  # Some VMs running
-    else
-        return 2  # No VMs running
-    fi
-}
 
-# Smart VM startup - only start if needed
+# Smart VM startup - handles different VM states appropriately
 smart_start_vms() {
-    check_vm_status
-    local vm_status=$?
+    info "Attempting to start VMs intelligently..."
     
-    case $vm_status in
-        0)
-            success "VMs are already running - proceeding with tests"
-            return 0
-            ;;
-        1)
-            warn "Some VMs are running, some are not. Starting all VMs..."
-            start_vms
-            ;;
-        2)
-            info "No VMs running. Starting VMs..."
-            start_vms
-            ;;
-    esac
+    # Try resume first (fast if VMs are suspended)
+    info "Trying to resume VMs first..."
+    if vagrant resume 2>/dev/null; then
+        success "VMs resumed successfully"
+        return 0
+    fi
+    
+    # If resume fails, try vagrant up (handles poweroff/not_created states)
+    info "Resume failed, starting VMs from scratch..."
+    if vagrant up 2>/dev/null; then
+        success "VMs started successfully"
+        return 0
+    fi
+    
+    error "Failed to start VMs"
+    return 1
 }
 
 ssh_menu() {
@@ -1048,13 +1045,14 @@ usage() {
     cat << EOF
 Development Test Environment for Docker Stack Backup
 
-Usage: $0 {run|fresh|up|down|destroy|ps|shell}
+Usage: $0 {run|fresh|up|resume|down|destroy|ps|shell}
 
 Commands:
     run         - Run test suite (smart: use existing VMs if running)
     fresh       - Run test suite (clean: destroy and recreate VMs)
-    up          - Start VMs only (for manual testing)
-    down        - Stop VMs
+    up          - Start VMs (smart: resume if suspended, start if poweroff)
+    resume      - Resume suspended VMs (fast)
+    down        - Suspend VMs (fast, preserves state)
     destroy     - Destroy VMs completely
     ps          - Show VM status and access info
     shell       - Interactive VM access menu
@@ -1065,16 +1063,22 @@ Internal:
 Examples:
     $0 run          # Fast: run tests on existing VMs
     $0 fresh        # Slow: clean start with fresh VMs
-    $0 up           # Just start VMs for manual testing
+    $0 up           # Smart start: resume suspended or start poweroff VMs
+    $0 resume       # Fast: resume suspended VMs only
+    $0 down         # Fast: suspend VMs (preserves state)
     $0 shell        # Access VMs interactively
 
 Development Workflow:
     # First time or when you need clean environment
     $0 fresh
 
-    # Subsequent runs (much faster)
-    $0 run
-    # Edit code...
+    # Fast suspend/resume cycle (recommended)
+    $0 up           # Smart start
+    # Manual testing...
+    $0 down         # Suspend (fast)
+    $0 up           # Resume (fast)
+
+    # Test runs (reuses existing VMs)
     $0 run
     # Edit code...
     $0 run
@@ -1093,6 +1097,11 @@ main() {
         "up")
             check_prerequisites
             smart_start_vms
+            show_vm_status
+            ;;
+        "resume")
+            check_prerequisites
+            resume_vms
             show_vm_status
             ;;
         "down")
