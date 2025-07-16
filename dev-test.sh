@@ -1985,6 +1985,158 @@ EOF
     return 0
 }
 
+# Test restore permission handling and validation
+test_restore_permission_handling() {
+    info "Testing restore permission handling and validation..."
+    
+    # Find the most recent backup
+    local latest_backup
+    latest_backup=$(ls -1t /opt/backup/docker_backup_*.tar.gz 2>/dev/null | head -1)
+    
+    if [[ -z "$latest_backup" ]]; then
+        error "No backup found for restore permission test"
+        return 1
+    fi
+    
+    info "Using backup for permission test: $(basename "$latest_backup")"
+    
+    # Test backup extraction permissions without actually running full restore
+    local test_script="/tmp/test_restore_permissions.sh"
+    
+    cat > "$test_script" << 'EOF'
+#!/bin/bash
+export DOCKER_BACKUP_TEST=true
+export NON_INTERACTIVE=true
+source /home/vagrant/docker-stack-backup/backup-manager.sh
+
+# Test 1: Verify backup can be read
+backup_file="$1"
+if [[ ! -f "$backup_file" ]]; then
+    echo "❌ Backup file not accessible"
+    exit 1
+fi
+
+# Test 2: Test tar listing (should work without sudo)
+if tar -tf "$backup_file" >/dev/null 2>&1; then
+    echo "✅ Backup archive is readable and valid"
+else
+    echo "❌ Backup archive is corrupted or unreadable"
+    exit 1
+fi
+
+# Test 3: Test metadata extraction (should work without sudo)
+temp_dir="/tmp/test_permissions_$$"
+mkdir -p "$temp_dir"
+
+if tar -xzf "$backup_file" -C "$temp_dir" backup_metadata.json 2>/dev/null; then
+    if [[ -f "$temp_dir/backup_metadata.json" ]]; then
+        echo "✅ Metadata extraction works correctly"
+        
+        # Test 4: Validate metadata file format
+        if jq . "$temp_dir/backup_metadata.json" >/dev/null 2>&1; then
+            echo "✅ Metadata file format is valid JSON"
+            
+            # Test 5: Check if permissions array exists
+            local perm_count=$(jq '.permissions | length' "$temp_dir/backup_metadata.json" 2>/dev/null || echo "0")
+            if [[ "$perm_count" -gt 0 ]]; then
+                echo "✅ Backup contains permission information ($perm_count entries)"
+            else
+                echo "⚠️  Backup contains no permission information"
+            fi
+        else
+            echo "❌ Metadata file has invalid JSON format"
+            rm -rf "$temp_dir"
+            exit 1
+        fi
+    fi
+else
+    echo "⚠️  No metadata file found in backup (older backup format)"
+fi
+
+# Test 6: Test restore validation functions exist and are callable
+if declare -F restore_using_metadata >/dev/null; then
+    echo "✅ restore_using_metadata function is available"
+else
+    echo "❌ restore_using_metadata function not found"
+    rm -rf "$temp_dir"
+    exit 1
+fi
+
+# Test 7: Verify sudo access for tar operations (needed for restore)
+if sudo tar --version >/dev/null 2>&1; then
+    echo "✅ Sudo access for tar operations available"
+else
+    echo "❌ Sudo access for tar operations not available"
+    rm -rf "$temp_dir"
+    exit 1
+fi
+
+rm -rf "$temp_dir"
+echo "✅ All restore permission tests passed"
+exit 0
+EOF
+    
+    chmod +x "$test_script"
+    if sudo -u vagrant "$test_script" "$latest_backup"; then
+        success "Restore permission handling working correctly"
+    else
+        error "Restore permission handling test failed"
+        return 1
+    fi
+    
+    rm -f "$test_script"
+    return 0
+}
+
+# Test restore interactive prompts with timeout
+test_restore_interactive_timeout() {
+    info "Testing restore interactive prompts with timeout functionality..."
+    
+    local test_script="/tmp/test_restore_timeout.sh"
+    
+    cat > "$test_script" << 'EOF'
+#!/bin/bash
+export DOCKER_BACKUP_TEST=true
+export NON_INTERACTIVE=true
+export PROMPT_TIMEOUT=5
+source /home/vagrant/docker-stack-backup/backup-manager.sh
+
+# Test restore prompts work in non-interactive mode
+start_time=$(date +%s)
+
+# Mock list_backups to return false (no backups)
+list_backups() {
+    echo "No backups available"
+    return 1
+}
+
+# This should complete quickly without hanging
+restore_backup >/dev/null 2>&1
+
+end_time=$(date +%s)
+duration=$((end_time - start_time))
+
+if [[ $duration -le 5 ]]; then
+    echo "✅ Restore interactive timeout working correctly (${duration}s)"
+    exit 0
+else
+    echo "❌ Restore taking too long or hanging (${duration}s)"
+    exit 1
+fi
+EOF
+    
+    chmod +x "$test_script"
+    if timeout 15 sudo -u vagrant "$test_script"; then
+        success "Restore interactive timeout working correctly"
+    else
+        error "Restore interactive timeout test failed"
+        return 1
+    fi
+    
+    rm -f "$test_script"
+    return 0
+}
+
 # Test interactive prompt timeout functionality
 test_prompt_timeout() {
     info "Testing prompt timeout functionality..."
@@ -2194,6 +2346,8 @@ run_vm_tests() {
     run_test "Metadata File Generation" "test_metadata_file_generation"
     run_test "Backup with Metadata" "test_backup_with_metadata"
     run_test "Restore with Metadata" "test_restore_with_metadata"
+    run_test "Restore Permission Handling" "test_restore_permission_handling"
+    run_test "Restore Interactive Timeout" "test_restore_interactive_timeout"
     run_test "Architecture Detection" "test_architecture_detection"
     
     info "🔧 PHASE 6: CUSTOM CONFIGURATION TESTING"

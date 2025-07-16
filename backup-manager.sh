@@ -2482,7 +2482,8 @@ restore_backup() {
     fi
     
     echo
-    read -p "Select backup number to restore (or 'q' to quit): " choice
+    local choice
+    choice=$(prompt_user "Select backup number to restore (or 'q' to quit)" "q")
     
     if [[ "$choice" == "q" || "$choice" == "Q" ]]; then
         info "Restore cancelled"
@@ -2504,9 +2505,7 @@ restore_backup() {
     printf "%b\n" "${YELLOW}WARNING: This will stop all containers and restore data from backup!${NC}"
     echo "Selected backup: $backup_name"
     echo
-    read -p "Are you sure you want to continue? [y/N]: " confirm
-    
-    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+    if ! prompt_yes_no "Are you sure you want to continue?" "n"; then
         info "Restore cancelled"
         return 0
     fi
@@ -2520,22 +2519,28 @@ restore_backup() {
     local current_backup_name="pre_restore_$(date '+%Y%m%d_%H%M%S')"
     info "Creating backup of current state: $current_backup_name"
     cd /
-    tar --same-owner --same-permissions -czf "$BACKUP_PATH/${current_backup_name}.tar.gz" \
+    if ! sudo tar --same-owner --same-permissions -czf "$BACKUP_PATH/${current_backup_name}.tar.gz" \
         "$(echo $PORTAINER_PATH | sed 's|^/||')" \
-        "$(echo $TOOLS_PATH | sed 's|^/||')" 2>/dev/null || true
+        "$(echo $TOOLS_PATH | sed 's|^/||')" 2>/dev/null; then
+        warn "Failed to create pre-restore backup, continuing with restore anyway"
+    fi
     
     # Extract backup
     info "Extracting backup..."
     cd /
-    tar --same-owner --same-permissions -xzf "$selected_backup"
+    if ! sudo tar --same-owner --same-permissions -xzf "$selected_backup"; then
+        error "Failed to extract backup archive"
+        error "The backup file may be corrupted or you may not have sufficient permissions"
+        return 1
+    fi
     
     # Check for metadata file and use it for enhanced restoration
     local metadata_file="/tmp/backup_metadata.json"
     if tar -tf "$selected_backup" | grep -q "backup_metadata.json"; then
-        tar -xzf "$selected_backup" -C /tmp backup_metadata.json 2>/dev/null || true
+        sudo tar -xzf "$selected_backup" -C /tmp backup_metadata.json 2>/dev/null || true
         if [[ -f "$metadata_file" ]]; then
             restore_using_metadata "$metadata_file"
-            rm -f "$metadata_file"
+            sudo rm -f "$metadata_file"
         fi
     fi
     
@@ -2549,15 +2554,43 @@ restore_backup() {
     # Restore stack states
     local stack_state_file="/tmp/stack_states.json"
     if tar -tf "$selected_backup" | grep -q "stack_states.json"; then
-        tar -xzf "$selected_backup" -C /tmp stack_states.json 2>/dev/null || true
+        sudo tar -xzf "$selected_backup" -C /tmp stack_states.json 2>/dev/null || true
         if [[ -f "$stack_state_file" ]]; then
             restart_stacks "$stack_state_file"
-            rm -f "$stack_state_file"
+            sudo rm -f "$stack_state_file"
         fi
     fi
     
-    success "Restore completed successfully"
+    # Validate restore success
+    info "Validating restore completion..."
+    local validation_failed=false
+    
+    # Check if key directories exist
+    if [[ ! -d "$PORTAINER_PATH/data" ]]; then
+        error "Portainer data directory not found after restore"
+        validation_failed=true
+    fi
+    
+    if [[ ! -d "$TOOLS_PATH" ]]; then
+        error "Tools directory not found after restore"
+        validation_failed=true
+    fi
+    
+    # Check if Portainer is accessible
+    sleep 10  # Give a bit more time for startup
+    if ! curl -s "http://localhost:9000" >/dev/null 2>&1; then
+        warn "Portainer may not be fully accessible yet (this is normal immediately after restore)"
+    fi
+    
+    if [[ "$validation_failed" == "true" ]]; then
+        error "Restore validation failed - some components may not have restored correctly"
+        error "Check the logs and consider restoring from a different backup"
+        return 1
+    fi
+    
+    success "Restore completed and validated successfully"
     success "Portainer available at: $PORTAINER_URL"
+    info "Note: Services may take a few minutes to fully initialize"
 }
 
 # Setup backup scheduling
