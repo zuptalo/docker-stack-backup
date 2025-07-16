@@ -134,3 +134,5 @@ The project uses enterprise-grade Vagrant testing with full Ubuntu 24.04 VMs:
 ```
 
 The system is designed for user-independent deployment (works with any setup user) and maintains production-ready permissions and error handling throughout.
+
+please go through the TODO.md and REQUIREMENTS.md and then based on the highest priority to lowest start going through addressing the items in TODO.md, for every item that you complete make sure proper tests are added if missing or updated if existing, verify that the whole test suite passes and the commit the changes you made with a proper commit message, push it to the GitHub repo and move on to the next. make sure to add in the commit message that the whole process was done by purely by you following the instructions and no human intervention if you managed to actually start from an item in the todo list and do everything that I requested and push to GitHub, if for any reason you were stopped during implementing an item, make sure to include that in the commit message so other users of the system can see your power and autonomy in action and learn from the experience.

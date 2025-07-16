@@ -21,6 +21,12 @@ DEFAULT_PORTAINER_SUBDOMAIN="pt"
 DEFAULT_NPM_SUBDOMAIN="npm"
 DEFAULT_PORTAINER_USER="portainer"
 
+# Non-interactive mode configuration
+NON_INTERACTIVE="${NON_INTERACTIVE:-false}"
+AUTO_YES="${AUTO_YES:-false}"
+QUIET_MODE="${QUIET_MODE:-false}"
+PROMPT_TIMEOUT="${PROMPT_TIMEOUT:-60}"  # Default 60 second timeout
+
 # Test environment defaults
 TEST_DOMAIN="zuptalo.local"
 TEST_PORTAINER_SUBDOMAIN="pt"
@@ -165,11 +171,10 @@ install_dependencies() {
             info "Test environment detected - auto-installing dependencies"
             install_confirmed=true
         else
-            read -p "Install missing tools automatically? [Y/n]: " install_choice
-            if [[ "$install_choice" =~ ^[Nn]$ ]]; then
-                install_confirmed=false
-            else
+            if prompt_yes_no "Install missing tools automatically?" "y"; then
                 install_confirmed=true
+            else
+                install_confirmed=false
             fi
         fi
         
@@ -291,6 +296,98 @@ check_setup_required() {
 # Check if running in test environment
 is_test_environment() {
     [[ "${DOCKER_BACKUP_TEST:-}" == "true" ]] || [[ -f "/.dockerenv" ]]
+}
+
+# Enhanced prompt function with timeout and non-interactive support
+prompt_user() {
+    local prompt_text="$1"
+    local default_value="${2:-}"
+    local timeout_default="${3:-${default_value}}"
+    local variable_name=""
+    
+    # Handle non-interactive modes
+    if [[ "$NON_INTERACTIVE" == "true" ]] || is_test_environment; then
+        if [[ -n "$default_value" ]]; then
+            printf "%s" "$default_value"
+        else
+            printf "%s" "$timeout_default"
+        fi
+        return 0
+    fi
+    
+    # Show prompt with timeout warning
+    local full_prompt="$prompt_text"
+    if [[ "$PROMPT_TIMEOUT" -gt 0 ]]; then
+        full_prompt="$prompt_text (${PROMPT_TIMEOUT}s timeout, default: ${timeout_default})"
+    fi
+    
+    local user_input=""
+    if [[ "$PROMPT_TIMEOUT" -gt 0 ]]; then
+        # Use timeout for interactive prompt
+        if read -t "$PROMPT_TIMEOUT" -p "$full_prompt: " user_input; then
+            if [[ -n "$user_input" ]]; then
+                printf "%s" "$user_input"
+            else
+                printf "%s" "$default_value"
+            fi
+        else
+            # Timeout occurred
+            echo >&2  # New line after timeout
+            warn "Prompt timeout after ${PROMPT_TIMEOUT} seconds, using default: ${timeout_default}"
+            printf "%s" "$timeout_default"
+        fi
+    else
+        # No timeout, regular prompt
+        read -p "$full_prompt: " user_input
+        if [[ -n "$user_input" ]]; then
+            printf "%s" "$user_input"
+        else
+            printf "%s" "$default_value"
+        fi
+    fi
+}
+
+# Yes/No prompt with timeout and auto-yes support
+prompt_yes_no() {
+    local prompt_text="$1"
+    local default_answer="${2:-n}"  # Default to 'n' for safety
+    
+    # Handle auto-yes mode
+    if [[ "$AUTO_YES" == "true" ]]; then
+        info "Auto-yes mode: $prompt_text -> y"
+        return 0
+    fi
+    
+    # Handle non-interactive modes
+    if [[ "$NON_INTERACTIVE" == "true" ]] || is_test_environment; then
+        if [[ "$default_answer" =~ ^[Yy]$ ]]; then
+            return 0
+        else
+            return 1
+        fi
+    fi
+    
+    local user_input
+    local full_prompt="$prompt_text [y/N]"
+    if [[ "$default_answer" =~ ^[Yy]$ ]]; then
+        full_prompt="$prompt_text [Y/n]"
+    fi
+    
+    if [[ "$PROMPT_TIMEOUT" -gt 0 ]]; then
+        full_prompt="$full_prompt (${PROMPT_TIMEOUT}s timeout, default: ${default_answer})"
+        if read -t "$PROMPT_TIMEOUT" -p "$full_prompt: " user_input; then
+            [[ -z "$user_input" ]] && user_input="$default_answer"
+        else
+            echo >&2  # New line after timeout
+            warn "Prompt timeout after ${PROMPT_TIMEOUT} seconds, using default: ${default_answer}"
+            user_input="$default_answer"
+        fi
+    else
+        read -p "$full_prompt: " user_input
+        [[ -z "$user_input" ]] && user_input="$default_answer"
+    fi
+    
+    [[ "$user_input" =~ ^[Yy]$ ]]
 }
 
 # Setup log file with proper permissions
@@ -462,32 +559,15 @@ interactive_configuration() {
     echo "Configure each setting (press Enter to keep default):"
     echo
     
-    read -p "System user [$PORTAINER_USER]: " input
-    PORTAINER_USER="${input:-$PORTAINER_USER}"
-    
-    read -p "Portainer data path [$PORTAINER_PATH]: " input
-    PORTAINER_PATH="${input:-$PORTAINER_PATH}"
-    
-    read -p "Tools data path [$TOOLS_PATH]: " input
-    TOOLS_PATH="${input:-$TOOLS_PATH}"
-    
-    read -p "Backup storage path [$BACKUP_PATH]: " input
-    BACKUP_PATH="${input:-$BACKUP_PATH}"
-    
-    read -p "Local backup retention (days) [$BACKUP_RETENTION]: " input
-    BACKUP_RETENTION="${input:-$BACKUP_RETENTION}"
-    
-    read -p "Remote backup retention (days) [$REMOTE_RETENTION]: " input
-    REMOTE_RETENTION="${input:-$REMOTE_RETENTION}"
-    
-    read -p "Domain name [$DOMAIN_NAME]: " input
-    DOMAIN_NAME="${input:-$DOMAIN_NAME}"
-    
-    read -p "Portainer subdomain [$PORTAINER_SUBDOMAIN]: " input
-    PORTAINER_SUBDOMAIN="${input:-$PORTAINER_SUBDOMAIN}"
-    
-    read -p "NPM admin subdomain [$NPM_SUBDOMAIN]: " input
-    NPM_SUBDOMAIN="${input:-$NPM_SUBDOMAIN}"
+    PORTAINER_USER=$(prompt_user "System user" "$PORTAINER_USER")
+    PORTAINER_PATH=$(prompt_user "Portainer data path" "$PORTAINER_PATH")
+    TOOLS_PATH=$(prompt_user "Tools data path" "$TOOLS_PATH")
+    BACKUP_PATH=$(prompt_user "Backup storage path" "$BACKUP_PATH")
+    BACKUP_RETENTION=$(prompt_user "Local backup retention (days)" "$BACKUP_RETENTION")
+    REMOTE_RETENTION=$(prompt_user "Remote backup retention (days)" "$REMOTE_RETENTION")
+    DOMAIN_NAME=$(prompt_user "Domain name" "$DOMAIN_NAME")
+    PORTAINER_SUBDOMAIN=$(prompt_user "Portainer subdomain" "$PORTAINER_SUBDOMAIN")
+    NPM_SUBDOMAIN=$(prompt_user "NPM admin subdomain" "$NPM_SUBDOMAIN")
     
     confirm_configuration
 }
@@ -511,8 +591,7 @@ confirm_configuration() {
     echo "System User: $PORTAINER_USER"
     echo
     
-    read -p "Save this configuration? [Y/n]: " confirm
-    if [[ "$confirm" =~ ^[Nn]$ ]]; then
+    if ! prompt_yes_no "Save this configuration?" "y"; then
         echo "Configuration not saved. Exiting."
         exit 0
     fi
@@ -610,8 +689,7 @@ migrate_paths() {
     echo "6. Restart services and validate"
     echo
     
-    read -p "Proceed with migration? [y/N]: " confirm
-    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+    if ! prompt_yes_no "Proceed with migration?" "n"; then
         echo "Migration cancelled"
         return 1
     fi
@@ -653,8 +731,7 @@ perform_path_migration() {
         echo
         jq -r '.stacks[] | "  - \(.name) (ID: \(.id))"' "$stack_inventory" 2>/dev/null || echo "  - Unable to list stacks"
         echo
-        read -p "Continue with complex migration? [y/N]: " complex_confirm
-        if [[ ! "$complex_confirm" =~ ^[Yy]$ ]]; then
+        if ! prompt_yes_no "Continue with complex migration?" "n"; then
             error "Migration cancelled due to complexity"
             return 1
         fi
@@ -2270,8 +2347,7 @@ restore_using_metadata() {
         warn "  Docker images may not be compatible"
         echo
         if ! is_test_environment; then
-            read -p "Continue with restore anyway? [y/N]: " arch_confirm
-            if [[ ! "$arch_confirm" =~ ^[Yy]$ ]]; then
+            if ! prompt_yes_no "Continue with restore anyway?" "n"; then
                 error "Restore cancelled due to architecture mismatch"
                 return 1
             fi
@@ -3312,7 +3388,14 @@ usage() {
     printf "%b" "$(cat << EOF
 Docker Backup Manager v${VERSION}
 
-Usage: $0 {setup|config|backup|restore|schedule|generate-nas-script|update}
+Usage: $0 [FLAGS] {setup|config|backup|restore|schedule|generate-nas-script|update}
+
+${BLUE}═══ FLAGS ═══${NC}
+    ${BLUE}--yes, -y${NC}               # Auto-answer 'yes' to all prompts
+    ${BLUE}--non-interactive, -n${NC}   # Run in non-interactive mode (use defaults)
+    ${BLUE}--quiet, -q${NC}             # Minimize output
+    ${BLUE}--timeout=SECONDS${NC}       # Set prompt timeout (default: 60)
+    ${BLUE}--help, -h${NC}              # Show this help message
 
 ${BLUE}═══ WORKFLOW COMMANDS (in recommended order) ═══${NC}
     ${BLUE}setup${NC}               - 🚀 Initial setup (install Docker, create user, deploy services)
@@ -3344,12 +3427,60 @@ EOF
 )"
 }
 
+# Parse command-line flags
+parse_flags() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --yes|--auto-yes|-y)
+                AUTO_YES="true"
+                shift
+                ;;
+            --non-interactive|--no-interactive|-n)
+                NON_INTERACTIVE="true"
+                shift
+                ;;
+            --quiet|-q)
+                QUIET_MODE="true"
+                shift
+                ;;
+            --timeout=*)
+                PROMPT_TIMEOUT="${1#*=}"
+                shift
+                ;;
+            --timeout)
+                PROMPT_TIMEOUT="$2"
+                shift 2
+                ;;
+            --help|-h)
+                usage
+                exit 0
+                ;;
+            -*)
+                error "Unknown flag: $1"
+                usage
+                exit 1
+                ;;
+            *)
+                # Not a flag, return remaining arguments
+                break
+                ;;
+        esac
+    done
+    
+    # Return remaining arguments
+    printf '%s\n' "$@"
+}
+
 # Main function dispatcher
 main() {
     check_root
     load_config
     
-    case "${1:-}" in
+    # Parse flags and get remaining arguments
+    local remaining_args
+    remaining_args=($(parse_flags "$@"))
+    
+    case "${remaining_args[0]:-}" in
         setup)
             install_dependencies
             configure_paths

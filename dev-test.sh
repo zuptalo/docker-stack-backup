@@ -1855,6 +1855,116 @@ EOF
     return 0
 }
 
+# Test interactive prompt timeout functionality
+test_prompt_timeout() {
+    info "Testing prompt timeout functionality..."
+    
+    # Source the script functions
+    source /home/vagrant/docker-stack-backup/backup-manager.sh >/dev/null 2>&1 || true
+    
+    # Test 1: Non-interactive mode
+    NON_INTERACTIVE=true
+    local result1
+    result1=$(prompt_yes_no "Test non-interactive prompt" "y" 2>/dev/null)
+    if [[ $? -eq 0 ]]; then
+        success "Non-interactive mode returns correct default (yes)"
+    else
+        error "Non-interactive mode failed"
+        return 1
+    fi
+    
+    # Test 2: Auto-yes mode
+    NON_INTERACTIVE=false
+    AUTO_YES=true
+    local result2
+    result2=$(prompt_yes_no "Test auto-yes prompt" "n" 2>/dev/null)
+    if [[ $? -eq 0 ]]; then
+        success "Auto-yes mode correctly returns yes"
+    else
+        error "Auto-yes mode failed"
+        return 1
+    fi
+    
+    # Test 3: Basic prompt function
+    NON_INTERACTIVE=true
+    AUTO_YES=false
+    local result3
+    result3=$(prompt_user "Test prompt" "default_value" 2>/dev/null)
+    if [[ "$result3" == "default_value" ]]; then
+        success "Prompt function returns correct default in non-interactive mode"
+    else
+        error "Prompt function failed to return default value"
+        return 1
+    fi
+    
+    return 0
+}
+
+# Test environment variable configuration
+test_environment_variable_configuration() {
+    info "Testing environment variable configuration..."
+    
+    # Test environment variable support for timeouts
+    export PROMPT_TIMEOUT=30
+    export NON_INTERACTIVE=true
+    export AUTO_YES=false
+    
+    # Source script again to pick up env vars
+    source /home/vagrant/docker-stack-backup/backup-manager.sh >/dev/null 2>&1 || true
+    
+    # Verify environment variables are respected
+    if [[ "$PROMPT_TIMEOUT" == "30" ]]; then
+        success "PROMPT_TIMEOUT environment variable respected"
+    else
+        error "PROMPT_TIMEOUT environment variable not working"
+        return 1
+    fi
+    
+    if [[ "$NON_INTERACTIVE" == "true" ]]; then
+        success "NON_INTERACTIVE environment variable respected"
+    else
+        error "NON_INTERACTIVE environment variable not working"
+        return 1
+    fi
+    
+    # Clean up
+    unset PROMPT_TIMEOUT NON_INTERACTIVE AUTO_YES
+    
+    return 0
+}
+
+# Test command-line flag parsing
+test_command_line_flags() {
+    info "Testing command-line flag parsing..."
+    
+    # Test help flag (should exit cleanly)
+    local help_output
+    help_output=$(/home/vagrant/docker-stack-backup/backup-manager.sh --help 2>&1 || true)
+    
+    if echo "$help_output" | grep -q "FLAGS"; then
+        success "Help flag shows new FLAGS section"
+    else
+        error "Help flag doesn't show FLAGS section"
+        return 1
+    fi
+    
+    if echo "$help_output" | grep -q "non-interactive"; then
+        success "Help shows non-interactive flag documentation"
+    else
+        error "Help missing non-interactive flag documentation"
+        return 1
+    fi
+    
+    if echo "$help_output" | grep -q "timeout"; then
+        success "Help shows timeout flag documentation"
+    else
+        error "Help missing timeout flag documentation"
+        return 1
+    fi
+    
+    return 0
+}
+
 # Run all tests inside VM
 run_vm_tests() {
     # Set proper error handling for tests
@@ -1911,6 +2021,13 @@ run_vm_tests() {
     run_test "Backup Current Version" "test_backup_current_version"
     run_test "Update Command Help" "test_update_command_help"
     run_test "Service Accessibility" "test_service_accessibility"
+    
+    info "⚙️  PHASE 1B: INTERACTIVE FEATURES"
+    echo "=============================================================="
+    
+    run_test "Prompt Timeout Functionality" "test_prompt_timeout"
+    run_test "Environment Variable Configuration" "test_environment_variable_configuration"
+    run_test "Command-line Flag Parsing" "test_command_line_flags"
     
     info "💾 PHASE 2: BACKUP FUNCTIONALITY"
     echo "=============================================================="

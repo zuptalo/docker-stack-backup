@@ -331,27 +331,41 @@ This document tracks the implementation of missing features and improvements ide
 
 ## Phase 6: Real-World User Issues (Critical Priority)
 
-### 🔴 **20. Missing jq Dependency Auto-Installation**
-- **Status**: ❌ Not Started
+### ✅ **20. Missing jq Dependency Auto-Installation**
+- **Status**: ✅ Completed (Already Working)
 - **Priority**: Critical
 - **Description**: Script fails on fresh Ubuntu systems because jq is not automatically installed
 - **Requirements**:
-  - Detect missing jq dependency during setup
-  - Automatically install jq during setup process
-  - Provide clear error message with installation instructions if auto-install fails
+  - ✅ Detect missing jq dependency during setup
+  - ✅ Automatically install jq during setup process
+  - ✅ Provide clear error message with installation instructions if auto-install fails
 - **Impact**: Blocks all functionality on fresh systems
+- **Implementation Details**:
+  - Already implemented in `install_dependencies()` function (lines 121-192)
+  - Called at the beginning of every major command
+  - Automatically detects missing tools (curl, wget, jq)
+  - Auto-installs in test environment, prompts user in production
+  - Comprehensive error handling and verification
+- **Test Results**: ✅ Verified working in fresh VM environment
 
-### 🔴 **21. Interactive Command Timeout Issues**
-- **Status**: ❌ Not Started
+### ✅ **21. Interactive Command Timeout Issues**
+- **Status**: ✅ Completed
 - **Priority**: High
 - **Description**: Commands hang indefinitely waiting for user input without timeout or non-interactive options
 - **Requirements**:
-  - Add timeout mechanism for interactive prompts
-  - Implement non-interactive mode flags (e.g., `--yes`, `--default`)
-  - Add environment variable support for non-interactive usage
-  - Provide clear progress indicators during long operations
+  - ✅ Add timeout mechanism for interactive prompts
+  - ✅ Implement non-interactive mode flags (e.g., `--yes`, `--default`)
+  - ✅ Add environment variable support for non-interactive usage
+  - ✅ Provide clear progress indicators during long operations
 - **Affected Commands**: setup, restore, schedule, config
 - **Impact**: Poor user experience, especially in automation scenarios
+- **Implementation Details**:
+  - Added `prompt_user()` and `prompt_yes_no()` helper functions with timeout support
+  - Implemented command-line flags: `--yes`, `--non-interactive`, `--quiet`, `--timeout=SECONDS`
+  - Added environment variable support: `NON_INTERACTIVE`, `AUTO_YES`, `QUIET_MODE`, `PROMPT_TIMEOUT`
+  - Updated key interactive prompts throughout the script to use new helper functions
+  - Added comprehensive test coverage with 3 new test functions
+- **Test Results**: ✅ All 3 new tests passing (Prompt Timeout, Environment Variables, Flag Parsing)
 
 ### 🔴 **22. DNS Verification Hang During Setup**
 - **Status**: ❌ Not Started
