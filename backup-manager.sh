@@ -1187,18 +1187,19 @@ get_public_ip() {
     fi
 }
 
-# Check DNS resolution using dig or nslookup
+# Check DNS resolution using dig or nslookup with timeout
 check_dns_resolution() {
     local domain="$1"
     local expected_ip="$2"
+    local timeout_seconds="${3:-10}"  # Default 10 second timeout
     
     local resolved_ip=""
     
-    # Try dig first (more reliable)
+    # Try dig first (more reliable) with timeout
     if command -v dig >/dev/null 2>&1; then
-        resolved_ip=$(dig +short "$domain" A 2>/dev/null | head -1)
+        resolved_ip=$(timeout "$timeout_seconds" dig +short "$domain" A 2>/dev/null | head -1 || echo "")
     elif command -v nslookup >/dev/null 2>&1; then
-        resolved_ip=$(nslookup "$domain" 2>/dev/null | grep -A1 "^Name:" | grep "Address:" | awk '{print $2}' | head -1)
+        resolved_ip=$(timeout "$timeout_seconds" nslookup "$domain" 2>/dev/null | grep -A1 "^Name:" | grep "Address:" | awk '{print $2}' | head -1 || echo "")
     fi
     
     # Clean up any trailing characters
@@ -1230,8 +1231,7 @@ verify_dns_and_ssl() {
         warn "Could not determine public IP address"
         warn "DNS verification will be skipped"
         echo
-        read -p "Continue without DNS verification? [y/N]: " continue_without_dns
-        if [[ ! "$continue_without_dns" =~ ^[Yy]$ ]]; then
+        if ! prompt_yes_no "Continue without DNS verification?" "n"; then
             error "Setup cancelled"
             exit 1
         fi
@@ -1252,7 +1252,7 @@ verify_dns_and_ssl() {
         success "✅ $PORTAINER_URL resolves to $public_ip"
         portainer_dns_ok=true
     else
-        local resolved_ip=$(dig +short "$PORTAINER_URL" A 2>/dev/null | head -1)
+        local resolved_ip=$(timeout 10 dig +short "$PORTAINER_URL" A 2>/dev/null | head -1 || echo "")
         if [[ -n "$resolved_ip" ]]; then
             error "❌ $PORTAINER_URL resolves to $resolved_ip (expected: $public_ip)"
         else
@@ -1265,7 +1265,7 @@ verify_dns_and_ssl() {
         success "✅ $NPM_URL resolves to $public_ip"
         npm_dns_ok=true
     else
-        local resolved_ip=$(dig +short "$NPM_URL" A 2>/dev/null | head -1)
+        local resolved_ip=$(timeout 10 dig +short "$NPM_URL" A 2>/dev/null | head -1 || echo "")
         if [[ -n "$resolved_ip" ]]; then
             error "❌ $NPM_URL resolves to $resolved_ip (expected: $public_ip)"
         else
@@ -1299,17 +1299,50 @@ verify_dns_and_ssl() {
         echo "3) Exit setup to configure DNS manually"
         echo
         
-        read -p "Select option [1-3]: " dns_choice
+        local dns_choice
+        dns_choice=$(prompt_user "Select option [1-3]" "2")
         
         case "$dns_choice" in
             1)
                 echo
                 info "Waiting for DNS propagation..."
-                echo "Press Ctrl+C to cancel or wait..."
-                sleep 10
+                info "Waiting 30 seconds for DNS changes to propagate..."
+                sleep 30
                 
-                # Re-check DNS after wait
-                return $(verify_dns_and_ssl)
+                # Re-check DNS with timeout - try 3 times max
+                local retry_count=0
+                local max_retries=3
+                while [[ $retry_count -lt $max_retries ]]; do
+                    info "DNS re-check attempt $((retry_count + 1))/$max_retries"
+                    
+                    # Check both domains again with timeout
+                    local portainer_retry_ok=false
+                    local npm_retry_ok=false
+                    
+                    if check_dns_resolution "$PORTAINER_URL" "$public_ip" 10; then
+                        portainer_retry_ok=true
+                    fi
+                    
+                    if check_dns_resolution "$NPM_URL" "$public_ip" 10; then
+                        npm_retry_ok=true
+                    fi
+                    
+                    if [[ "$portainer_retry_ok" == true ]] && [[ "$npm_retry_ok" == true ]]; then
+                        success "DNS resolution successful after retry!"
+                        return 0
+                    fi
+                    
+                    retry_count=$((retry_count + 1))
+                    if [[ $retry_count -lt $max_retries ]]; then
+                        info "DNS still not ready, waiting 15 more seconds..."
+                        sleep 15
+                    fi
+                done
+                
+                warn "DNS verification failed after $max_retries attempts"
+                warn "Continuing with HTTP-only setup"
+                export SKIP_SSL_CERTIFICATES=true
+                return 0
                 ;;
             2)
                 warn "Continuing with HTTP-only setup"

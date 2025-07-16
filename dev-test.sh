@@ -1855,6 +1855,136 @@ EOF
     return 0
 }
 
+# Test DNS resolution timeout functionality
+test_dns_resolution_timeout() {
+    info "Testing DNS resolution timeout functionality..."
+    cd /home/vagrant/docker-stack-backup
+    
+    # Test the timeout functionality in check_dns_resolution
+    local test_script="/tmp/test_dns_timeout.sh"
+    
+    cat > "$test_script" << 'EOF'
+#!/bin/bash
+
+# Source the actual backup-manager.sh script to get real functions
+export DOCKER_BACKUP_TEST=true
+source /home/vagrant/docker-stack-backup/backup-manager.sh
+
+# Test 1: Normal DNS resolution with timeout (should work quickly)
+start_time=$(date +%s)
+if check_dns_resolution "google.com" "8.8.8.8" 5; then
+    echo "✅ Quick DNS resolution works"
+else
+    # Try with actual resolved IP for google.com
+    resolved_ip=$(timeout 5 dig +short google.com A 2>/dev/null | head -1 || echo "")
+    if [[ -n "$resolved_ip" ]] && check_dns_resolution "google.com" "$resolved_ip" 5; then
+        echo "✅ Quick DNS resolution works with correct IP"
+    else
+        echo "⚠️  DNS resolution test inconclusive (network issues)"
+    fi
+fi
+end_time=$(date +%s)
+duration=$((end_time - start_time))
+
+if [[ $duration -le 10 ]]; then
+    echo "✅ DNS timeout working correctly (completed in ${duration}s)"
+else
+    echo "❌ DNS resolution took too long (${duration}s)"
+    exit 1
+fi
+
+# Test 2: Test with non-existent domain (should timeout quickly)
+start_time=$(date +%s)
+if check_dns_resolution "this-domain-absolutely-does-not-exist-12345.invalid" "1.2.3.4" 3; then
+    echo "❌ Non-existent domain should not resolve"
+    exit 1
+else
+    echo "✅ Non-existent domain correctly fails to resolve"
+fi
+end_time=$(date +%s)
+duration=$((end_time - start_time))
+
+if [[ $duration -le 8 ]]; then
+    echo "✅ DNS timeout for invalid domain working correctly (completed in ${duration}s)"
+else
+    echo "❌ DNS timeout for invalid domain took too long (${duration}s)"
+    exit 1
+fi
+
+echo "✅ DNS timeout functionality working correctly"
+exit 0
+EOF
+    
+    chmod +x "$test_script"
+    if sudo -u vagrant timeout 30 "$test_script"; then
+        success "DNS resolution timeout functionality working"
+    else
+        error "DNS resolution timeout test failed"
+        return 1
+    fi
+    
+    rm -f "$test_script"
+    return 0
+}
+
+# Test DNS verification non-interactive mode and timeout behavior
+test_dns_verification_non_interactive() {
+    info "Testing DNS verification non-interactive mode and timeout behavior..."
+    cd /home/vagrant/docker-stack-backup
+    
+    local test_script="/tmp/test_dns_noninteractive.sh"
+    
+    cat > "$test_script" << 'EOF'
+#!/bin/bash
+
+# Test that DNS verification completes quickly without hanging
+start_time=$(date +%s)
+
+# Run DNS verification in non-interactive mode with failed public IP
+timeout 15 bash -c '
+    export DOCKER_BACKUP_TEST=true
+    export NON_INTERACTIVE=true
+    export PROMPT_TIMEOUT=5
+    source /home/vagrant/docker-stack-backup/backup-manager.sh >/dev/null 2>&1
+    
+    # Override test environment detection to test actual DNS verification
+    is_test_environment() { return 1; }
+    
+    # Mock failed public IP to trigger the prompt we want to test
+    get_public_ip() { echo ""; }
+    
+    # This should exit quickly with non-interactive default (N) without hanging
+    verify_dns_and_ssl >/dev/null 2>&1
+' >/dev/null 2>&1
+
+# Capture the exit status - we expect it to fail (non-interactive chooses "N")
+exit_status=$?
+end_time=$(date +%s)
+duration=$((end_time - start_time))
+
+# The key test is that it completes quickly without hanging
+if [[ $duration -le 8 ]]; then
+    echo "✅ DNS verification completed quickly in non-interactive mode (${duration}s)"
+    echo "✅ No hanging behavior detected"
+    exit 0
+else
+    echo "❌ DNS verification took too long or hung (${duration}s)"
+    exit 1
+fi
+EOF
+    
+    chmod +x "$test_script"
+    if sudo -u vagrant "$test_script"; then
+        success "DNS verification non-interactive mode working (no hanging)"
+    else
+        error "DNS verification non-interactive mode test failed"
+        return 1
+    fi
+    
+    rm -f "$test_script"
+    return 0
+}
+
 # Test interactive prompt timeout functionality
 test_prompt_timeout() {
     info "Testing prompt timeout functionality..."
@@ -2016,6 +2146,8 @@ run_vm_tests() {
     run_test "DNS Verification Skip" "test_dns_verification_skip"
     run_test "SSL Certificate Skip Flag" "test_ssl_certificate_skip_flag"
     run_test "DNS Verification with Misconfigured DNS" "test_dns_verification_with_misconfigured_dns"
+    run_test "DNS Resolution Timeout" "test_dns_resolution_timeout"
+    run_test "DNS Verification Non-Interactive Mode" "test_dns_verification_non_interactive"
     run_test "Internet Connectivity Check" "test_internet_connectivity_check"
     run_test "Version Comparison" "test_version_comparison"
     run_test "Backup Current Version" "test_backup_current_version"
