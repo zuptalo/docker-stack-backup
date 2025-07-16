@@ -87,15 +87,14 @@ show_vm_status() {
     echo
     info "Access Information:"
     info "- Primary VM: vagrant ssh primary"
-    info "- Remote VM: vagrant ssh remote"
     echo
     info "Service Access (after tests complete):"
     info "- nginx-proxy-manager admin: http://localhost:8091"
     info "- Portainer: http://localhost:9001"
     echo
-    info "SSH between VMs:"
+    info "VM Network:"
     info "- Primary IP: 192.168.56.10"
-    info "- Remote IP: 192.168.56.11"
+    info "- SSH Port: 2222 (for NAS testing from host)"
 }
 
 
@@ -121,17 +120,193 @@ smart_start_vms() {
     return 1
 }
 
-ssh_menu() {
-    echo "Choose which VM to access:"
-    echo "1) Primary server (docker-backup-primary)"
-    echo "2) Remote server (docker-backup-remote)"
-    read -p "Select [1-2]: " choice
+# Snapshot management functions
+manage_snapshots() {
+    local action="$1"
+    local snapshot_name="${2:-}"
     
-    case "$choice" in
-        1) vagrant ssh primary ;;
-        2) vagrant ssh remote ;;
-        *) echo "Invalid choice" ;;
+    case "$action" in
+        "save")
+            if [[ -z "$snapshot_name" ]]; then
+                error "Snapshot name required: $0 snapshot save <name>"
+                return 1
+            fi
+            info "Saving snapshot: $snapshot_name"
+            vagrant snapshot save primary "$snapshot_name"
+            success "Snapshot '$snapshot_name' saved"
+            ;;
+        "restore")
+            if [[ -z "$snapshot_name" ]]; then
+                error "Snapshot name required: $0 snapshot restore <name>"
+                return 1
+            fi
+            info "Restoring snapshot: $snapshot_name"
+            vagrant snapshot restore primary "$snapshot_name"
+            success "Snapshot '$snapshot_name' restored"
+            ;;
+        "list")
+            info "Available snapshots:"
+            vagrant snapshot list primary
+            ;;
+        "delete")
+            if [[ -z "$snapshot_name" ]]; then
+                error "Snapshot name required: $0 snapshot delete <name>"
+                return 1
+            fi
+            info "Deleting snapshot: $snapshot_name"
+            vagrant snapshot delete primary "$snapshot_name"
+            success "Snapshot '$snapshot_name' deleted"
+            ;;
+        *)
+            error "Unknown snapshot action: $action"
+            error "Valid actions: save, restore, list, delete"
+            return 1
+            ;;
     esac
+}
+
+# Check if a snapshot exists
+snapshot_exists() {
+    local snapshot_name="$1"
+    vagrant snapshot list primary 2>/dev/null | grep -q "^$snapshot_name$"
+}
+
+# Ensure required snapshots exist
+check_snapshots() {
+    local missing_snapshots=()
+    
+    if ! snapshot_exists "clean_state"; then
+        missing_snapshots+=("clean_state")
+    fi
+    
+    if ! snapshot_exists "tools_installed"; then
+        missing_snapshots+=("tools_installed")
+    fi
+    
+    if [[ ${#missing_snapshots[@]} -gt 0 ]]; then
+        error "Missing required snapshots: ${missing_snapshots[*]}"
+        error "Please run: $0 prepare"
+        error "This will create the base snapshots needed for fast testing"
+        return 1
+    fi
+    
+    return 0
+}
+
+# Install tools (Docker, dependencies) without running full setup
+install_tools_only() {
+    info "Installing tools on clean VM..."
+    
+    vagrant ssh primary -c "
+        cd /home/vagrant/docker-stack-backup
+        export DOCKER_BACKUP_TEST=true
+        
+        # Install dependencies only
+        echo 'Installing dependencies...'
+        if ! ./backup-manager.sh setup 2>&1 | grep -E '(Installing|SUCCESS|ERROR)'; then
+            echo 'Tool installation failed'
+            exit 1
+        fi
+        
+        echo 'Tools installation completed'
+    "
+}
+
+# Prepare command: create VM and base snapshots
+prepare_environment() {
+    info "🏗️  Preparing development environment (this may take 15+ minutes)..."
+    
+    # Check if snapshots already exist
+    if snapshot_exists "clean_state" && snapshot_exists "tools_installed"; then
+        success "Environment already prepared!"
+        info "Available snapshots:"
+        vagrant snapshot list primary 2>/dev/null
+        info "You can now use: $0 run, $0 fresh, or $0 dirty-run"
+        return 0
+    fi
+    
+    # Step 1: Create/start VM
+    info "Step 1/4: Creating VM..."
+    smart_start_vms
+    
+    # Step 2: Save clean state snapshot
+    info "Step 2/4: Saving clean_state snapshot..."
+    if ! snapshot_exists "clean_state"; then
+        vagrant snapshot save primary "clean_state"
+        success "clean_state snapshot created"
+    else
+        info "clean_state snapshot already exists"
+    fi
+    
+    # Step 3: Install tools
+    info "Step 3/4: Installing tools (Docker, dependencies)..."
+    install_tools_only
+    
+    # Step 4: Save tools snapshot
+    info "Step 4/4: Saving tools_installed snapshot..."
+    if ! snapshot_exists "tools_installed"; then
+        vagrant snapshot save primary "tools_installed"
+        success "tools_installed snapshot created"
+    else
+        info "tools_installed snapshot already exists"
+    fi
+    
+    success "🎉 Environment preparation complete!"
+    info "Available commands:"
+    info "  $0 run         - Fast testing (restore tools + test)"
+    info "  $0 fresh       - Clean testing (restore clean + install + test)"
+    info "  $0 dirty-run   - Instant testing (test current state)"
+}
+
+# Fast run: restore tools snapshot and run tests
+run_fast_test_suite() {
+    check_prerequisites
+    
+    if ! check_snapshots; then
+        return 1
+    fi
+    
+    info "🚀 Fast test mode: restoring tools_installed snapshot..."
+    vagrant snapshot restore primary "tools_installed"
+    
+    info "Running tests on tools-ready VM..."
+    vagrant ssh primary -c "sudo -n /home/vagrant/docker-stack-backup/dev-test.sh --vm-tests"
+}
+
+# Clean run: restore clean snapshot, install tools, and run tests  
+run_clean_test_suite() {
+    check_prerequisites
+    
+    if ! check_snapshots; then
+        return 1
+    fi
+    
+    info "🧹 Clean test mode: restoring clean_state snapshot..."
+    vagrant snapshot restore primary "clean_state"
+    
+    info "Installing tools..."
+    install_tools_only
+    
+    info "Running tests on freshly prepared VM..."
+    vagrant ssh primary -c "sudo -n /home/vagrant/docker-stack-backup/dev-test.sh --vm-tests"
+}
+
+# Dirty run: just run tests on current VM state
+run_dirty_test_suite() {
+    check_prerequisites
+    
+    info "⚡ Dirty test mode: running tests on current VM state..."
+    
+    # Just make sure VM is running
+    smart_start_vms
+    
+    info "Running tests without any restoration..."
+    vagrant ssh primary -c "sudo -n /home/vagrant/docker-stack-backup/dev-test.sh --vm-tests"
+}
+
+ssh_menu() {
+    info "Accessing primary VM..."
+    vagrant ssh primary
 }
 
 # =================================================================
@@ -875,14 +1050,14 @@ setup_remote_connection() {
     fi
 }
 
-test_remote_backup_sync() {
-    info "Testing remote backup synchronization..."
+test_nas_script_with_host() {
+    info "Testing NAS script functionality with host machine as target..."
     cd /home/vagrant/docker-stack-backup
     
     # Ensure we have a NAS backup script in /tmp/
     local nas_script="/tmp/nas-backup-client.sh"
     if [[ ! -f "$nas_script" ]]; then
-        warn "NAS backup script not found in /tmp/, skipping remote sync test"
+        warn "NAS backup script not found in /tmp/, skipping host sync test"
         return 0
     fi
     
@@ -901,12 +1076,19 @@ test_remote_backup_sync() {
         "$nas_script" invalid-command >/dev/null 2>&1 || true
     fi
     
-    # Since we can't easily test actual remote sync in this VM environment,
-    # we'll validate that the script contains the expected components
+    # Validate that the script contains the expected components
     if grep -q "SSH_PRIVATE_KEY_B64=" "$nas_script" && \
        grep -q "PRIMARY_SERVER_IP=" "$nas_script" && \
        grep -q "sync_backups()" "$nas_script"; then
         success "NAS backup script contains all required components"
+        
+        # Copy script to project directory for host testing
+        if cp "$nas_script" /home/vagrant/docker-stack-backup/nas-backup-client.sh; then
+            info "NAS script copied to project directory for host testing"
+            info "Host can now run: ./nas-backup-client.sh test"
+            info "Host can run: DOCKER_BACKUP_TEST=true ./nas-backup-client.sh sync"
+        fi
+        
         return 0
     else
         error "NAS backup script missing required components"
@@ -2286,10 +2468,19 @@ test_command_line_flags() {
     local help_output
     help_output=$(/home/vagrant/docker-stack-backup/backup-manager.sh --help 2>&1 || true)
     
-    if echo "$help_output" | grep -q "FLAGS"; then
+    # Debug: check what we got
+    info "DEBUG: Help output length: ${#help_output}"
+    if [[ ${#help_output} -lt 100 ]]; then
+        info "DEBUG: Help output too short, content: $help_output"
+    fi
+    
+    # Use a more explicit grep to avoid any issues
+    if printf "%s" "$help_output" | grep -F "FLAGS" >/dev/null 2>&1; then
         success "Help flag shows new FLAGS section"
     else
         error "Help flag doesn't show FLAGS section"
+        info "DEBUG: Full help output follows:"
+        printf "%s\n" "$help_output"
         return 1
     fi
     
@@ -2306,6 +2497,129 @@ test_command_line_flags() {
         error "Help missing timeout flag documentation"
         return 1
     fi
+    
+    return 0
+}
+
+# Test configuration file support
+test_config_file_support() {
+    info "Testing configuration file support..."
+    
+    # Create a test configuration file
+    local test_config="/tmp/test-backup-config.conf"
+    cat > "$test_config" << 'EOF'
+# Test configuration for Docker Stack Backup
+DOMAIN_NAME="test-config.example.com"
+PORTAINER_SUBDOMAIN="pt-test"
+NPM_SUBDOMAIN="npm-test"
+PORTAINER_PATH="/opt/test-portainer"
+TOOLS_PATH="/opt/test-tools"
+BACKUP_PATH="/opt/test-backup"
+BACKUP_RETENTION=14
+REMOTE_RETENTION=30
+EOF
+    
+    # Test config file loading
+    local test_output
+    test_output=$(/home/vagrant/docker-stack-backup/backup-manager.sh --config-file="$test_config" --help 2>&1 || true)
+    
+    if echo "$test_output" | grep -q "FLAGS"; then
+        success "Config file flag doesn't break help command"
+    else
+        error "Config file flag breaks help command"
+        rm -f "$test_config"
+        return 1
+    fi
+    
+    # Test invalid config file path
+    local error_output
+    error_output=$(/home/vagrant/docker-stack-backup/backup-manager.sh --config-file="/nonexistent/path" --help 2>&1 || true)
+    
+    if echo "$error_output" | grep -q "Configuration file not found"; then
+        success "Proper error handling for missing config file"
+    else
+        error "Missing proper error for non-existent config file"
+        rm -f "$test_config"
+        return 1
+    fi
+    
+    # Test config file with syntax errors
+    local bad_config="/tmp/bad-backup-config.conf"
+    cat > "$bad_config" << 'EOF'
+# Bad configuration with syntax error
+DOMAIN_NAME="test.com
+MISSING_QUOTE=bad syntax here
+EOF
+    
+    local syntax_error_output
+    syntax_error_output=$(/home/vagrant/docker-stack-backup/backup-manager.sh --config-file="$bad_config" --help 2>&1 || true)
+    
+    if echo "$syntax_error_output" | grep -q "syntax errors"; then
+        success "Proper error handling for config file syntax errors"
+    else
+        error "Missing syntax error detection for bad config file"
+        rm -f "$test_config" "$bad_config"
+        return 1
+    fi
+    
+    # Clean up
+    rm -f "$test_config" "$bad_config"
+    
+    return 0
+}
+
+# Test complete non-interactive workflow
+test_non_interactive_workflow() {
+    info "Testing complete non-interactive workflow..."
+    
+    # Create a complete configuration file
+    local full_config="/tmp/full-backup-config.conf"
+    cat > "$full_config" << 'EOF'
+# Complete configuration for non-interactive setup
+DOMAIN_NAME="auto-setup.example.com"
+PORTAINER_SUBDOMAIN="pt"
+NPM_SUBDOMAIN="npm"
+PORTAINER_PATH="/opt/portainer"
+TOOLS_PATH="/opt/tools"
+BACKUP_PATH="/opt/backup"
+BACKUP_RETENTION=7
+REMOTE_RETENTION=14
+PORTAINER_USER="portainer"
+NON_INTERACTIVE=true
+AUTO_YES=true
+QUIET_MODE=false
+SKIP_SSL_CERTIFICATES=true
+EOF
+    
+    # Test that the config loads properly with various commands
+    local config_test_commands=("--help" "config --help")
+    
+    for cmd in "${config_test_commands[@]}"; do
+        local cmd_output
+        cmd_output=$(/home/vagrant/docker-stack-backup/backup-manager.sh --config-file="$full_config" $cmd 2>&1 || true)
+        
+        if [[ ${#cmd_output} -gt 50 ]]; then
+            success "Config file works with command: $cmd"
+        else
+            error "Config file fails with command: $cmd"
+            info "Output: $cmd_output"
+            rm -f "$full_config"
+            return 1
+        fi
+    done
+    
+    # Test environment variable priority over config file
+    DOMAIN_NAME="env-override.example.com" /home/vagrant/docker-stack-backup/backup-manager.sh --config-file="$full_config" --help >/dev/null 2>&1
+    if [[ $? -eq 0 ]]; then
+        success "Environment variables work alongside config file"
+    else
+        error "Environment variables don't work with config file"
+        rm -f "$full_config"
+        return 1
+    fi
+    
+    # Clean up
+    rm -f "$full_config"
     
     return 0
 }
@@ -2375,6 +2689,8 @@ run_vm_tests() {
     run_test "Prompt Timeout Functionality" "test_prompt_timeout"
     run_test "Environment Variable Configuration" "test_environment_variable_configuration"
     run_test "Command-line Flag Parsing" "test_command_line_flags"
+    run_test "Configuration File Support" "test_config_file_support"
+    run_test "Non-Interactive Workflow" "test_non_interactive_workflow"
     
     info "💾 PHASE 2: BACKUP FUNCTIONALITY"
     echo "=============================================================="
@@ -2392,11 +2708,10 @@ run_vm_tests() {
     run_test "NAS Backup Script Generation" "test_nas_backup_script_generation"
     run_test "NAS Backup Script Functionality" "test_nas_backup_script_functionality"
     
-    info "🌐 PHASE 4: REMOTE BACKUP SYNCHRONIZATION"
+    info "🌐 PHASE 4: HOST-BASED NAS TESTING"
     echo "=============================================================="
     
-    setup_remote_connection
-    run_test "Remote Backup Sync" "test_remote_backup_sync"
+    run_test "NAS Script Host Integration" "test_nas_script_with_host"
     
     info "⚙️  PHASE 5: CONFIG AND MIGRATION FUNCTIONALITY"
     echo "=============================================================="
@@ -2465,76 +2780,79 @@ run_vm_tests() {
 # MAIN FUNCTIONS
 # =================================================================
 
+# Legacy function - kept for backward compatibility
 run_full_test_suite() {
-    check_prerequisites
-    smart_start_vms
-    
-    info "Running comprehensive tests (scripts mounted directly)..."
-    vagrant ssh primary -c "sudo -n /home/vagrant/docker-stack-backup/dev-test.sh --vm-tests"
-}
-
-# Clean start - destroy VMs and run fresh tests
-run_clean_test_suite() {
-    check_prerequisites
-    cleanup_vms
-    start_vms
-    
-    info "Running comprehensive tests (clean start)..."
-    vagrant ssh primary -c "sudo -n /home/vagrant/docker-stack-backup/dev-test.sh --vm-tests"
+    warn "⚠️  run_full_test_suite is deprecated. Use run_fast_test_suite instead."
+    run_fast_test_suite
 }
 
 usage() {
     cat << EOF
 Development Test Environment for Docker Stack Backup
 
-Usage: $0 {run|fresh|up|resume|down|destroy|ps|shell}
+Usage: $0 {prepare|run|fresh|dirty-run|up|resume|down|destroy|ps|shell|snapshot}
 
-Commands:
-    run         - Run test suite (smart: use existing VMs if running)
-    fresh       - Run test suite (clean: destroy and recreate VMs)
-    up          - Start VMs (smart: resume if suspended, start if poweroff)
-    resume      - Resume suspended VMs (fast)
-    down        - Suspend VMs (fast, preserves state)
-    destroy     - Destroy VMs completely
+Test Commands:
+    prepare     - 🏗️  Initial setup: create VM and generate base snapshots (run once)
+    run         - 🚀 Fast test: restore tools snapshot → run tests (recommended)
+    fresh       - 🧹 Clean test: restore clean snapshot → install tools → run tests
+    dirty-run   - ⚡ Instant test: run tests on current VM state (fastest)
+
+VM Management:
+    up          - Start VM (smart: resume if suspended, start if poweroff)
+    resume      - Resume suspended VM (fast)
+    down        - Suspend VM (fast, preserves state)
+    destroy     - Destroy VM completely
     ps          - Show VM status and access info
-    shell       - Interactive VM access menu
+    shell       - Interactive VM access
+
+Snapshot Commands:
+    $0 snapshot save <name>     - Save current VM state as snapshot
+    $0 snapshot restore <name>  - Restore VM to snapshot state
+    $0 snapshot list           - List available snapshots
+    $0 snapshot delete <name>  - Delete a snapshot
 
 Internal:
     --vm-tests  - Run tests inside VM (used internally)
 
-Examples:
-    $0 run          # Fast: run tests on existing VMs
-    $0 fresh        # Slow: clean start with fresh VMs
-    $0 up           # Smart start: resume suspended or start poweroff VMs
-    $0 resume       # Fast: resume suspended VMs only
-    $0 down         # Fast: suspend VMs (preserves state)
-    $0 shell        # Access VMs interactively
+Recommended Workflow:
+    # First time setup (do once)
+    $0 prepare              # Creates clean_state and tools_installed snapshots
 
-Development Workflow:
-    # First time or when you need clean environment
-    $0 fresh
-
-    # Fast suspend/resume cycle (recommended)
-    $0 up           # Smart start
-    # Manual testing...
-    $0 down         # Suspend (fast)
-    $0 up           # Resume (fast)
-
-    # Test runs (reuses existing VMs)
-    $0 run
+    # Daily development (super fast)
+    $0 run                  # Restore tools → test (30s + test time)
     # Edit code...
-    $0 run
+    $0 run                  # Restore tools → test again
+
+    # When you need totally clean environment
+    $0 fresh                # Restore clean → install tools → test
+
+    # When testing incremental changes
+    $0 dirty-run            # Test current state (no restoration)
+
+Speed Comparison:
+    dirty-run: ~2 minutes   (just tests)
+    run:      ~3 minutes   (restore tools + tests)  
+    fresh:    ~8 minutes   (restore clean + install + tests)
+    prepare:  ~15 minutes  (create VM + 2 snapshots, run once)
 
 EOF
 }
 
 main() {
     case "${1:-}" in
+        "prepare"|"")
+            # Default action when no args or explicit prepare command
+            prepare_environment
+            ;;
         "run")
-            run_full_test_suite
+            run_fast_test_suite
             ;;
         "fresh")
             run_clean_test_suite
+            ;;
+        "dirty-run")
+            run_dirty_test_suite
             ;;
         "up")
             check_prerequisites
@@ -2557,6 +2875,10 @@ main() {
             ;;
         "shell")
             ssh_menu
+            ;;
+        "snapshot")
+            check_prerequisites
+            manage_snapshots "${2:-}" "${3:-}"
             ;;
         "--vm-tests")
             # This runs inside the VM

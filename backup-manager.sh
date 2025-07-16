@@ -26,6 +26,7 @@ NON_INTERACTIVE="${NON_INTERACTIVE:-false}"
 AUTO_YES="${AUTO_YES:-false}"
 QUIET_MODE="${QUIET_MODE:-false}"
 PROMPT_TIMEOUT="${PROMPT_TIMEOUT:-60}"  # Default 60 second timeout
+CONFIG_FILE="${CONFIG_FILE:-}"  # Path to configuration file
 
 # Test environment defaults
 TEST_DOMAIN="zuptalo.local"
@@ -392,10 +393,28 @@ prompt_yes_no() {
 
 # Setup log file with proper permissions
 
-# Load configuration
+# Load configuration from file
 load_config() {
-    if [[ -f "$CONFIG_FILE" ]]; then
+    if [[ -n "$CONFIG_FILE" ]]; then
+        if [[ ! -f "$CONFIG_FILE" ]]; then
+            error "Configuration file not found: $CONFIG_FILE"
+            exit 1
+        fi
+        
+        info "Loading configuration from: $CONFIG_FILE"
+        
+        # Validate and source the config file safely
+        if ! bash -n "$CONFIG_FILE" 2>/dev/null; then
+            error "Configuration file has syntax errors: $CONFIG_FILE"
+            exit 1
+        fi
+        
         source "$CONFIG_FILE"
+        info "Configuration loaded successfully"
+    elif [[ -f "/etc/docker-backup-manager.conf" ]]; then
+        # Load system config if it exists and no explicit config file specified
+        info "Loading system configuration from: /etc/docker-backup-manager.conf"
+        source "/etc/docker-backup-manager.conf"
     fi
     
     # Set defaults based on environment
@@ -1428,6 +1447,10 @@ create_portainer_user() {
     
     if id "$PORTAINER_USER" >/dev/null 2>&1; then
         success "User $PORTAINER_USER already exists"
+        
+        # Ensure SSH keys are set up even for existing user
+        setup_ssh_keys
+        success "SSH key setup verified for existing user"
         return 0
     fi
     
@@ -1509,28 +1532,28 @@ validate_ssh_setup() {
     local ssh_pub_path="/home/$PORTAINER_USER/.ssh/id_rsa.pub"
     local auth_keys_path="/home/$PORTAINER_USER/.ssh/authorized_keys"
     
-    # Check if SSH private key exists and is readable
-    if [[ ! -f "$ssh_key_path" ]]; then
+    # Check if SSH private key exists and is readable (use sudo since files are owned by portainer)
+    if ! sudo test -f "$ssh_key_path"; then
         error "SSH private key not found at: $ssh_key_path"
         error "NAS backup functionality will not work without SSH keys"
         return 1
     fi
     
     # Check if SSH public key exists
-    if [[ ! -f "$ssh_pub_path" ]]; then
+    if ! sudo test -f "$ssh_pub_path"; then
         error "SSH public key not found at: $ssh_pub_path"
         return 1
     fi
     
     # Check if authorized_keys exists
-    if [[ ! -f "$auth_keys_path" ]]; then
+    if ! sudo test -f "$auth_keys_path"; then
         error "SSH authorized_keys not found at: $auth_keys_path"
         return 1
     fi
     
     # Check permissions
-    local private_perms=$(stat -c "%a" "$ssh_key_path" 2>/dev/null)
-    local auth_perms=$(stat -c "%a" "$auth_keys_path" 2>/dev/null)
+    local private_perms=$(sudo stat -c "%a" "$ssh_key_path" 2>/dev/null)
+    local auth_perms=$(sudo stat -c "%a" "$auth_keys_path" 2>/dev/null)
     
     if [[ "$private_perms" != "600" ]]; then
         error "SSH private key has incorrect permissions: $private_perms (should be 600)"
@@ -2895,7 +2918,12 @@ PRIMARY_SERVER_USER="portainer"
 PRIMARY_BACKUP_PATH="/opt/backup"
 
 # Local backup storage (change this for your NAS)
-LOCAL_BACKUP_PATH="/volume1/backup/zuptalo"  # Change this path as needed
+# In test mode, use local backup directory that's gitignored
+if [[ "${DOCKER_BACKUP_TEST:-false}" == "true" ]]; then
+    LOCAL_BACKUP_PATH="./backup"  # Test mode: use local backup directory
+else
+    LOCAL_BACKUP_PATH="/volume1/backup/zuptalo"  # Production: NAS path
+fi
 RETENTION_DAYS=30
 
 # Temporary directory for SSH key
@@ -3555,6 +3583,7 @@ ${BLUE}═══ FLAGS ═══${NC}
     ${BLUE}--yes, -y${NC}               # Auto-answer 'yes' to all prompts
     ${BLUE}--non-interactive, -n${NC}   # Run in non-interactive mode (use defaults)
     ${BLUE}--quiet, -q${NC}             # Minimize output
+    ${BLUE}--config-file=PATH${NC}      # Load configuration from file
     ${BLUE}--timeout=SECONDS${NC}       # Set prompt timeout (default: 60)
     ${BLUE}--help, -h${NC}              # Show this help message
 
@@ -3582,6 +3611,19 @@ ${BLUE}═══ ADVANCED FEATURES ═══${NC}
     ${BLUE}$0 generate-nas-script${NC} # 📡 Create NAS backup client script
     ${BLUE}$0 update${NC}              # 🔄 Update to latest version
 
+${BLUE}═══ NON-INTERACTIVE USAGE ═══${NC}
+    ${BLUE}$0 --non-interactive --yes setup${NC}
+    ${BLUE}$0 --config-file=/path/to/config.conf setup${NC}
+    
+    ${YELLOW}Example config file (/etc/docker-backup-manager.conf):${NC}
+    ${GREEN}DOMAIN_NAME="example.com"${NC}
+    ${GREEN}PORTAINER_SUBDOMAIN="pt"${NC}
+    ${GREEN}NPM_SUBDOMAIN="npm"${NC}
+    ${GREEN}PORTAINER_PATH="/opt/portainer"${NC}
+    ${GREEN}TOOLS_PATH="/opt/tools"${NC}
+    ${GREEN}BACKUP_PATH="/opt/backup"${NC}
+    ${GREEN}BACKUP_RETENTION=7${NC}
+
 ${YELLOW}💡 Note: Run 'setup' first if this is a new installation${NC}
 
 EOF
@@ -3592,7 +3634,6 @@ EOF
 # Main function dispatcher
 main() {
     check_root
-    load_config
     
     # Parse flags first
     local temp_args=()
@@ -3618,6 +3659,14 @@ main() {
                 PROMPT_TIMEOUT="$2"
                 shift 2
                 ;;
+            --config-file=*)
+                CONFIG_FILE="${1#*=}"
+                shift
+                ;;
+            --config-file)
+                CONFIG_FILE="$2"
+                shift 2
+                ;;
             --help|-h)
                 usage
                 exit 0
@@ -3637,6 +3686,9 @@ main() {
     
     # Set the remaining arguments
     set -- "${temp_args[@]}"
+    
+    # Load configuration after flags are parsed
+    load_config
     
     case "${1:-}" in
         setup)
