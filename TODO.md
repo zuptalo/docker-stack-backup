@@ -84,36 +84,58 @@ This document tracks the implementation of missing features and improvements ide
   - ✅ VM startup when already running (graceful handling)
   - ✅ Suspend/resume workflow for faster development cycles
 
-### 🔴 **4. Path Migration in Config Command**
-- **Status**: ❌ Not Started
+### ✅ **4. Path Migration in Config Command**
+- **Status**: ✅ Completed
 - **Priority**: High
 - **Description**: Implement path migration functionality in config command - inventory stacks, warn about complexity, pre-migration backup, move data, update configurations
 - **Requirements**:
-  - Inventory deployed stacks via Portainer API
-  - Warn about complexity with additional stacks
-  - Create pre-migration backup
-  - Move data folders to new paths
-  - Update stack configurations with new paths
-  - Validate all services restart successfully
-- **Test Cases Needed**:
-  - Test config with only Portainer + NPM
-  - Test config with additional stacks
-  - Test path migration process
-  - Test rollback on failure
+  - ✅ Inventory deployed stacks via Portainer API
+  - ✅ Warn about complexity with additional stacks
+  - ✅ Create pre-migration backup
+  - ✅ Move data folders to new paths
+  - ✅ Update stack configurations with new paths
+  - ✅ Validate all services restart successfully
+- **Implementation Details**:
+  - Enhanced `configure_paths()` function to detect existing installations
+  - Added comprehensive `migrate_paths()` function with interactive UI
+  - Implemented `perform_path_migration()` with 6-step process
+  - Added `get_stack_inventory()` for detailed Portainer API integration
+  - Added `create_migration_backup()` for comprehensive pre-migration backups
+  - Added `migrate_data_folders()` with proper permission preservation
+  - Added `update_configurations_for_migration()` for config updates
+  - Added `restart_and_validate_services()` with API-based service management
+  - Added rollback information generation for recovery scenarios
+- **Test Cases Implemented**:
+  - ✅ Test config command with existing installation detection
+  - ✅ Test path migration validation logic
+  - ✅ Test stack inventory API functionality
+  - ✅ Test migration backup creation
+  - ✅ Test configuration updates after migration
+- **Manual Verification**: ✅ Confirmed migration mode detection and interactive flow work correctly
 
-### 🔴 **5. Dual Backup Approach for Reliability**
-- **Status**: ❌ Not Started
+### ✅ **5. Dual Backup Approach for Reliability**
+- **Status**: ✅ Completed
 - **Priority**: High
 - **Description**: Add metadata file generation for ownership/permissions alongside tar archive to ensure 100% reliability
 - **Requirements**:
-  - Generate metadata file with detailed ownership/permissions
-  - Include metadata file in backup archive
-  - Use metadata file during restore process
-  - Maintain tar.gz as primary method with metadata as backup
-- **Test Cases Needed**:
-  - Test metadata file generation
-  - Test metadata file usage during restore
-  - Test permission preservation across different scenarios
+  - ✅ Generate metadata file with detailed ownership/permissions
+  - ✅ Include metadata file in backup archive
+  - ✅ Use metadata file during restore process
+  - ✅ Maintain tar.gz as primary method with metadata as backup
+- **Implementation Details**:
+  - Added `generate_backup_metadata()` function to capture system information, paths, and detailed permissions
+  - Enhanced `create_backup()` to generate and include metadata file in backup archives
+  - Added `restore_using_metadata()` function to restore permissions and detect architecture mismatches
+  - Integrated metadata generation into backup process and metadata usage into restore process
+  - Added architecture detection and compatibility warnings during restore
+  - Supports graceful fallback when metadata is not available (backwards compatibility)
+- **Test Cases Implemented**:
+  - ✅ Test metadata file generation with proper JSON structure
+  - ✅ Test backup creation with metadata file included
+  - ✅ Test restore functionality with metadata file usage
+  - ✅ Test architecture detection and mismatch warnings
+  - ✅ Test permission restoration from metadata
+- **Manual Verification**: ✅ Confirmed backup archives contain metadata files with complete system information
 
 ### 🔴 **6. Architecture Detection in Restore Process**
 - **Status**: ❌ Not Started
@@ -307,10 +329,140 @@ This document tracks the implementation of missing features and improvements ide
 
 ---
 
+## Phase 6: Real-World User Issues (Critical Priority)
+
+### 🔴 **20. Missing jq Dependency Auto-Installation**
+- **Status**: ❌ Not Started
+- **Priority**: Critical
+- **Description**: Script fails on fresh Ubuntu systems because jq is not automatically installed
+- **Requirements**:
+  - Detect missing jq dependency during setup
+  - Automatically install jq during setup process
+  - Provide clear error message with installation instructions if auto-install fails
+- **Impact**: Blocks all functionality on fresh systems
+
+### 🔴 **21. Interactive Command Timeout Issues**
+- **Status**: ❌ Not Started
+- **Priority**: High
+- **Description**: Commands hang indefinitely waiting for user input without timeout or non-interactive options
+- **Requirements**:
+  - Add timeout mechanism for interactive prompts
+  - Implement non-interactive mode flags (e.g., `--yes`, `--default`)
+  - Add environment variable support for non-interactive usage
+  - Provide clear progress indicators during long operations
+- **Affected Commands**: setup, restore, schedule, config
+- **Impact**: Poor user experience, especially in automation scenarios
+
+### 🔴 **22. DNS Verification Hang During Setup**
+- **Status**: ❌ Not Started
+- **Priority**: High
+- **Description**: Setup command hangs during DNS verification phase with no timeout
+- **Requirements**:
+  - Add timeout for DNS resolution checks
+  - Implement retry mechanism with exponential backoff
+  - Allow skipping DNS verification with command-line flag
+  - Provide clear messaging about DNS verification status
+- **Impact**: Setup process cannot complete reliably
+
+### 🔴 **23. Restore Permission Failures**
+- **Status**: ❌ Not Started
+- **Priority**: High
+- **Description**: Restore process fails with multiple permission errors when extracting backups
+- **Requirements**:
+  - Fix permission handling during backup extraction
+  - Implement proper sudo escalation for restore operations
+  - Add validation of extracted files after restore
+  - Provide rollback mechanism if restore fails
+- **Impact**: Restore functionality is broken, defeating the purpose of backups
+
+### 🔴 **24. Missing SSH Key Setup During Installation**
+- **Status**: ❌ Not Started
+- **Priority**: Medium
+- **Description**: generate-nas-script fails because SSH keys are not properly set up during initial setup
+- **Requirements**:
+  - Ensure SSH key generation during setup process
+  - Add SSH key validation in setup verification
+  - Provide manual SSH key setup instructions if auto-setup fails
+  - Test SSH connectivity during setup process
+- **Impact**: NAS backup functionality unusable
+
+### 🔴 **25. Non-Interactive Mode Support**
+- **Status**: ❌ Not Started
+- **Priority**: Medium
+- **Description**: No support for automation-friendly non-interactive execution
+- **Requirements**:
+  - Add `--yes` flag for automatic confirmation
+  - Add `--config-file` option for non-interactive setup
+  - Add `--quiet` flag for minimal output
+  - Support environment variable configuration
+- **Impact**: Cannot be used in automation scripts or CI/CD pipelines
+
+### 🔴 **26. Command-Specific Help and Error Messages**
+- **Status**: ❌ Not Started
+- **Priority**: Medium
+- **Description**: Commands provide generic help instead of context-specific guidance
+- **Requirements**:
+  - Add `--help` flag support for individual commands
+  - Provide command-specific error messages
+  - Include usage examples for complex commands
+  - Add troubleshooting tips for common failures
+- **Impact**: Poor user experience when commands fail
+
+### 🔴 **27. Dependency Installation Automation**
+- **Status**: ❌ Not Started
+- **Priority**: Medium
+- **Description**: Script should automatically install required dependencies during setup
+- **Requirements**:
+  - Auto-install jq, curl, wget during setup
+  - Detect and install missing Docker dependencies
+  - Provide manual installation instructions if auto-install fails
+  - Add dependency validation after installation
+- **Impact**: Reduces setup friction for new users
+
+### 🔴 **28. Better Error Recovery and Rollback**
+- **Status**: ❌ Not Started
+- **Priority**: Medium
+- **Description**: When operations fail, there's no automatic cleanup or rollback mechanism
+- **Requirements**:
+  - Implement transaction-like operations with rollback
+  - Add cleanup mechanism for failed operations
+  - Provide recovery instructions for common failure scenarios
+  - Add validation steps after critical operations
+- **Impact**: Failed operations can leave system in inconsistent state
+
+### 🔴 **29. Improved Progress Feedback**
+- **Status**: ❌ Not Started
+- **Priority**: Low
+- **Description**: Long-running operations provide minimal feedback to users
+- **Requirements**:
+  - Add progress bars or spinners for long operations
+  - Provide estimated time remaining for backups/restores
+  - Add verbose mode for detailed operation logging
+  - Implement real-time status updates during critical operations
+- **Impact**: Poor user experience during long operations
+
+---
+
 ## Next Steps
 
-**Recommended starting point**: Begin with **Item 1 (DNS Verification)** as it's foundational to the setup process and affects user experience significantly.
+**CRITICAL**: Address **Phase 6: Real-World User Issues** first, as these are blockers for actual usage:
 
-**Implementation approach**: One item at a time, with full implementation and testing before moving to the next item.
+**Immediate Priority (Critical)**:
+1. **Item 20 (Missing jq Dependency)** - Blocks all functionality on fresh systems
+2. **Item 21 (Interactive Command Timeouts)** - Prevents reliable automation
+3. **Item 22 (DNS Verification Hang)** - Blocks setup completion
+4. **Item 23 (Restore Permission Failures)** - Breaks core backup/restore functionality
 
-**Testing validation**: Each item should be validated with `./dev-test.sh fresh` before being marked as complete.
+**High Priority**:
+5. **Item 24 (Missing SSH Key Setup)** - Breaks NAS backup functionality
+6. **Item 25 (Non-Interactive Mode)** - Essential for automation
+7. **Item 26 (Command-Specific Help)** - Critical for user experience
+
+**Medium Priority**:
+8. **Item 27 (Dependency Installation)** - Reduces setup friction
+9. **Item 28 (Error Recovery)** - Prevents system inconsistency
+10. **Item 29 (Progress Feedback)** - Improves user experience
+
+**Implementation approach**: Focus on **Phase 6 Real-World Issues** before continuing with other phases, as these are fundamental blockers for production usage.
+
+**Testing validation**: Each item should be validated with `./dev-test.sh fresh` and real-world manual testing before being marked as complete.

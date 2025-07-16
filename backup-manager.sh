@@ -29,12 +29,29 @@ TEST_NPM_SUBDOMAIN="npm"
 # Configuration file
 CONFIG_FILE="/etc/docker-backup-manager.conf"
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+# Colors for output - enable if terminal supports colors
+if [[ "${TERM:-}" == *"color"* ]] || [[ "${TERM:-}" == "xterm"* ]] || [[ "${TERM:-}" == "screen"* ]] || [[ "${TERM:-}" == "tmux"* ]]; then
+    # Known color terminals - enable colors
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[1;33m'
+    BLUE='\033[0;34m'
+    NC='\033[0m' # No Color
+elif [[ "${TERM:-}" != "dumb" ]] && command -v tput >/dev/null 2>&1 && tput colors >/dev/null 2>&1 && [[ "$(tput colors)" -ge 8 ]]; then
+    # Fallback to tput detection (removed TTY check for SSH compatibility)
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[1;33m'
+    BLUE='\033[0;34m'
+    NC='\033[0m' # No Color
+else
+    # No colors
+    RED=''
+    GREEN=''
+    YELLOW=''
+    BLUE=''
+    NC=''
+fi
 
 # Logging function
 log() {
@@ -44,16 +61,38 @@ log() {
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
     
     # Display message to console
-    echo -e "${timestamp} [${level}] ${message}"
+    printf "%s [%s] %b\n" "${timestamp}" "${level}" "${message}"
     
-    # Try to write to log file, use sudo if needed
-    if echo -e "${timestamp} [${level}] ${message}" >> "${LOG_FILE}" 2>/dev/null; then
-        # Success - normal write worked
-        :
-    else
-        # Failed - try with sudo
-        echo -e "${timestamp} [${level}] ${message}" | sudo tee -a "${LOG_FILE}" >/dev/null 2>&1 || true
+    # Try to write to log file with proper error handling (strip color codes)
+    local clean_message=$(printf "%b" "${message}" | sed 's/\x1b\[[0-9;]*m//g')
+    write_to_log "${timestamp} [${level}] ${clean_message}"
+}
+
+# Write to log file with proper permission handling
+write_to_log() {
+    local log_message="$1"
+    
+    # Ensure log file exists and has proper permissions
+    if [[ ! -f "${LOG_FILE}" ]]; then
+        # Create log file with sudo and set proper permissions
+        sudo touch "${LOG_FILE}" 2>/dev/null || return 0
+        sudo chmod 666 "${LOG_FILE}" 2>/dev/null || return 0
     fi
+    
+    # Try to write normally first
+    if printf "%s\n" "${log_message}" >> "${LOG_FILE}" 2>/dev/null; then
+        return 0
+    fi
+    
+    # If normal write fails, try with sudo
+    if printf "%s\n" "${log_message}" | sudo tee -a "${LOG_FILE}" >/dev/null 2>&1; then
+        # After sudo write, fix permissions for future writes
+        sudo chmod 666 "${LOG_FILE}" 2>/dev/null || true
+        return 0
+    fi
+    
+    # If both fail, just continue silently (don't break the script)
+    return 0
 }
 
 info() { log "INFO" "$*"; }
@@ -75,11 +114,178 @@ die() {
     exit 1
 }
 
+# Cache for dependency check results to avoid repeated checks
+DEPENDENCIES_CHECKED=false
+
+# Install required dependencies with optimization and user confirmation
+install_dependencies() {
+    # Skip if already checked in this session
+    if [[ "$DEPENDENCIES_CHECKED" == "true" ]]; then
+        return 0
+    fi
+    
+    info "Checking required dependencies..."
+    
+    # Define required tools with descriptions
+    local required_tools_list="curl wget jq"
+    
+    local missing_tools=()
+    local available_tools=()
+    
+    # Check which tools are missing
+    for tool in curl wget jq; do
+        if command -v "$tool" >/dev/null 2>&1; then
+            available_tools+=("$tool")
+        else
+            missing_tools+=("$tool")
+        fi
+    done
+    
+    # Show status of all tools
+    if [[ ${#available_tools[@]} -gt 0 ]]; then
+        success "Available tools: ${available_tools[*]}"
+    fi
+    
+    # Handle missing tools
+    if [[ ${#missing_tools[@]} -gt 0 ]]; then
+        echo
+        warn "Missing required tools detected:"
+        for tool in "${missing_tools[@]}"; do
+            case "$tool" in
+                curl) echo "  • $tool - Download files and make HTTP requests" ;;
+                wget) echo "  • $tool - Download files from web servers" ;;
+                jq) echo "  • $tool - Parse and manipulate JSON data" ;;
+                *) echo "  • $tool - Required system tool" ;;
+            esac
+        done
+        echo
+        
+        # Ask for user confirmation (skip in test environment)
+        if is_test_environment; then
+            info "Test environment detected - auto-installing dependencies"
+            install_confirmed=true
+        else
+            read -p "Install missing tools automatically? [Y/n]: " install_choice
+            if [[ "$install_choice" =~ ^[Nn]$ ]]; then
+                install_confirmed=false
+            else
+                install_confirmed=true
+            fi
+        fi
+        
+        if [[ "$install_confirmed" == "true" ]]; then
+            install_system_packages "${missing_tools[@]}"
+        else
+            error "Required tools are missing. Please install them manually:"
+            for tool in "${missing_tools[@]}"; do
+                error "  sudo apt-get install -y $tool"
+            done
+            return 1
+        fi
+    else
+        success "All required dependencies are available"
+    fi
+    
+    # Mark as checked to avoid repeated checks
+    DEPENDENCIES_CHECKED=true
+    return 0
+}
+
+# Install system packages with proper error handling
+install_system_packages() {
+    local packages=("$@")
+    
+    info "Installing system packages: ${packages[*]}"
+    
+    # Update package list
+    info "Updating package list..."
+    if ! sudo apt-get update >/dev/null 2>&1; then
+        error "Failed to update package list"
+        error "Please check your internet connection and try again"
+        return 1
+    fi
+    
+    # Install each package
+    for package in "${packages[@]}"; do
+        info "Installing $package..."
+        if sudo apt-get install -y "$package" >/dev/null 2>&1; then
+            success "$package installed successfully"
+        else
+            error "Failed to install $package"
+            error "You may need to install it manually: sudo apt-get install -y $package"
+            return 1
+        fi
+    done
+    
+    # Verify installations
+    info "Verifying installations..."
+    for package in "${packages[@]}"; do
+        if command -v "$package" >/dev/null 2>&1; then
+            success "$package is now available"
+        else
+            error "$package installation verification failed"
+            return 1
+        fi
+    done
+    
+    success "All packages installed and verified successfully"
+    return 0
+}
+
 # Check if running as root
 check_root() {
     if [[ $EUID -eq 0 ]]; then
         die "This script should not be run as root for security reasons. Run as a regular user with sudo privileges."
     fi
+}
+
+# Check if system setup is complete before running operational commands
+check_setup_required() {
+    local missing_requirements=()
+    
+    # Check if configuration file exists
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        missing_requirements+=("Configuration file missing")
+    fi
+    
+    # Check if portainer user exists
+    if ! id "$PORTAINER_USER" >/dev/null 2>&1; then
+        missing_requirements+=("System user '$PORTAINER_USER' not found")
+    fi
+    
+    # Check if Docker is installed
+    if ! command -v docker >/dev/null 2>&1; then
+        missing_requirements+=("Docker not installed")
+    fi
+    
+    # Check if basic directories exist
+    if [[ ! -d "$PORTAINER_PATH" ]]; then
+        missing_requirements+=("Portainer directory missing")
+    fi
+    
+    # If any requirements are missing, show setup guidance
+    if [[ ${#missing_requirements[@]} -gt 0 ]]; then
+        echo
+        error "System setup is incomplete. Cannot proceed with this command."
+        echo
+        warn "Missing requirements:"
+        for requirement in "${missing_requirements[@]}"; do
+            echo "  • $requirement"
+        done
+        echo
+        info "Please run the setup command first:"
+        printf "  %b\n" "${BLUE}./backup-manager.sh setup${NC}"
+        echo
+        info "The setup command will:"
+        echo "  • Install Docker and required dependencies"
+        echo "  • Create system user and directories"
+        echo "  • Configure Portainer and nginx-proxy-manager"
+        echo "  • Set up networking and SSL certificates"
+        echo
+        return 1
+    fi
+    
+    return 0
 }
 
 # Check if running in test environment
@@ -88,23 +294,6 @@ is_test_environment() {
 }
 
 # Setup log file with proper permissions
-setup_log_file() {
-    # Create log file if it doesn't exist
-    if [[ ! -f "$LOG_FILE" ]]; then
-        sudo touch "$LOG_FILE"
-        info "Created log file: $LOG_FILE"
-    fi
-    
-    # Set proper permissions so both vagrant and portainer users can write
-    sudo chmod 666 "$LOG_FILE"
-    
-    # Test write access
-    if echo "$(date '+%Y-%m-%d %H:%M:%S') [INFO] Log file setup completed" >> "$LOG_FILE" 2>/dev/null; then
-        success "Log file permissions configured successfully"
-    else
-        warn "Log file permissions may need adjustment"
-    fi
-}
 
 # Load configuration
 load_config() {
@@ -159,20 +348,122 @@ EOF
 
 # Interactive configuration
 configure_paths() {
-    # Skip interactive configuration in test environment or if config already exists
+    # Skip interactive configuration in test environment
     if is_test_environment; then
         info "Skipping interactive configuration in test environment"
         save_config
         return 0
     fi
     
+    # Check if this is an existing installation
     if [[ -f "$CONFIG_FILE" ]]; then
-        info "Using existing configuration"
+        info "Existing configuration found - entering path migration mode"
+        migrate_paths
         return 0
     fi
     
-    echo -e "${BLUE}=== Docker Backup Manager Configuration ===${NC}"
+    # Initial setup configuration with user choice
+    interactive_setup_configuration
+}
+
+# Interactive setup configuration with user choice
+interactive_setup_configuration() {
+    printf "%b\n" "${BLUE}=== Docker Backup Manager Initial Setup ===${NC}"
     echo
+    echo "Welcome to Docker Backup Manager setup!"
+    echo
+    printf "%b\n" "${BLUE}Current default configuration:${NC}"
+    echo "  • System user: $PORTAINER_USER"
+    echo "  • Portainer data path: $PORTAINER_PATH"
+    echo "  • Tools data path: $TOOLS_PATH"
+    echo "  • Backup storage path: $BACKUP_PATH"
+    echo "  • Local backup retention: $BACKUP_RETENTION days"
+    echo "  • Remote backup retention: $REMOTE_RETENTION days"
+    echo "  • Domain name: $DOMAIN_NAME"
+    echo "  • Portainer subdomain: $PORTAINER_SUBDOMAIN"
+    echo "  • NPM admin subdomain: $NPM_SUBDOMAIN"
+    echo
+    printf "%b\n" "${BLUE}Setup options:${NC}"
+    echo "1) Use default configuration (recommended for most users)"
+    echo "2) Customize configuration interactively"
+    echo "3) Show advanced configuration details"
+    echo "4) Exit setup"
+    echo
+    
+    read -p "Choose setup option [1-4]: " setup_choice
+    
+    case "$setup_choice" in
+        1)
+            info "Using default configuration"
+            confirm_configuration
+            ;;
+        2)
+            info "Starting interactive configuration"
+            interactive_configuration
+            ;;
+        3)
+            show_advanced_configuration_details
+            interactive_setup_configuration
+            ;;
+        4)
+            info "Setup cancelled by user"
+            exit 0
+            ;;
+        *)
+            warn "Invalid option selected. Using default configuration."
+            confirm_configuration
+            ;;
+    esac
+}
+
+# Show advanced configuration details
+show_advanced_configuration_details() {
+    echo
+    printf "%b\n" "${BLUE}=== Advanced Configuration Details ===${NC}"
+    echo
+    printf "%b\n" "${BLUE}System User ($PORTAINER_USER):${NC}"
+    echo "  • Used for running Docker containers and backup operations"
+    echo "  • Must have Docker group access and sudo privileges"
+    echo "  • Default 'portainer' is suitable for most installations"
+    echo
+    printf "%b\n" "${BLUE}Portainer Data Path ($PORTAINER_PATH):${NC}"
+    echo "  • Stores Portainer configuration and container data"
+    echo "  • Should be on a persistent volume with adequate space"
+    echo "  • Default /opt/portainer is standard for system installations"
+    echo
+    printf "%b\n" "${BLUE}Tools Data Path ($TOOLS_PATH):${NC}"
+    echo "  • Stores nginx-proxy-manager and other tool configurations"
+    echo "  • Should be on the same volume as Portainer for consistency"
+    echo "  • Default /opt/tools follows standard directory structure"
+    echo
+    printf "%b\n" "${BLUE}Backup Storage Path ($BACKUP_PATH):${NC}"
+    echo "  • Where backup archives are stored locally"
+    echo "  • Should have sufficient space for your backup retention policy"
+    echo "  • Default /opt/backup is accessible system-wide"
+    echo
+    printf "%b\n" "${BLUE}Backup Retention:${NC}"
+    echo "  • Local retention: How many backups to keep locally"
+    echo "  • Remote retention: How many backups to keep on remote storage"
+    echo "  • Higher retention uses more storage but provides more restore points"
+    echo
+    printf "%b\n" "${BLUE}Domain Configuration:${NC}"
+    echo "  • Domain name: Your main domain for accessing services"
+    echo "  • Subdomains: Used for accessing Portainer and nginx-proxy-manager"
+    echo "  • SSL certificates will be automatically requested if DNS is configured"
+    echo
+    echo "Press Enter to continue..."
+    read
+}
+
+# Interactive configuration
+interactive_configuration() {
+    printf "%b\n" "${BLUE}=== Interactive Configuration ===${NC}"
+    echo
+    echo "Configure each setting (press Enter to keep default):"
+    echo
+    
+    read -p "System user [$PORTAINER_USER]: " input
+    PORTAINER_USER="${input:-$PORTAINER_USER}"
     
     read -p "Portainer data path [$PORTAINER_PATH]: " input
     PORTAINER_PATH="${input:-$PORTAINER_PATH}"
@@ -198,14 +489,17 @@ configure_paths() {
     read -p "NPM admin subdomain [$NPM_SUBDOMAIN]: " input
     NPM_SUBDOMAIN="${input:-$NPM_SUBDOMAIN}"
     
-    read -p "Portainer system user [$PORTAINER_USER]: " input
-    PORTAINER_USER="${input:-$PORTAINER_USER}"
-    
+    confirm_configuration
+}
+
+# Confirm configuration before proceeding
+confirm_configuration() {
+    # Calculate URLs
     PORTAINER_URL="${PORTAINER_SUBDOMAIN}.${DOMAIN_NAME}"
     NPM_URL="${NPM_SUBDOMAIN}.${DOMAIN_NAME}"
     
     echo
-    echo -e "${BLUE}Configuration Summary:${NC}"
+    printf "%b\n" "${BLUE}=== Final Configuration Summary ===${NC}"
     echo "Domain: $DOMAIN_NAME"
     echo "Portainer URL: https://$PORTAINER_SUBDOMAIN.$DOMAIN_NAME"
     echo "NPM URL: https://$NPM_SUBDOMAIN.$DOMAIN_NAME"
@@ -224,6 +518,577 @@ configure_paths() {
     fi
     
     save_config
+}
+
+# Path migration for existing installations
+migrate_paths() {
+    printf "%b\n" "${BLUE}=== Path Migration Mode ===${NC}"
+    printf "%b\n" "${YELLOW}WARNING: This will migrate your existing installation to new paths${NC}"
+    echo
+    
+    # Store current paths
+    local old_portainer_path="$PORTAINER_PATH"
+    local old_tools_path="$TOOLS_PATH"
+    local old_backup_path="$BACKUP_PATH"
+    
+    # Show current configuration
+    printf "%b\n" "${BLUE}Current Configuration:${NC}"
+    echo "Portainer Path: $PORTAINER_PATH"
+    echo "Tools Path: $TOOLS_PATH"
+    echo "Backup Path: $BACKUP_PATH"
+    echo "Domain: $DOMAIN_NAME"
+    echo "Portainer URL: https://$PORTAINER_SUBDOMAIN.$DOMAIN_NAME"
+    echo "NPM URL: https://$NPM_SUBDOMAIN.$DOMAIN_NAME"
+    echo "Local Retention: $BACKUP_RETENTION days"
+    echo "Remote Retention: $REMOTE_RETENTION days"
+    echo "System User: $PORTAINER_USER"
+    echo
+    
+    # Get new paths
+    printf "%b\n" "${BLUE}Enter new paths (press Enter to keep current):${NC}"
+    echo
+    
+    read -p "New Portainer data path [$PORTAINER_PATH]: " input
+    local new_portainer_path="${input:-$PORTAINER_PATH}"
+    
+    read -p "New Tools data path [$TOOLS_PATH]: " input
+    local new_tools_path="${input:-$TOOLS_PATH}"
+    
+    read -p "New Backup storage path [$BACKUP_PATH]: " input
+    local new_backup_path="${input:-$BACKUP_PATH}"
+    
+    read -p "Domain name [$DOMAIN_NAME]: " input
+    DOMAIN_NAME="${input:-$DOMAIN_NAME}"
+    
+    read -p "Portainer subdomain [$PORTAINER_SUBDOMAIN]: " input
+    PORTAINER_SUBDOMAIN="${input:-$PORTAINER_SUBDOMAIN}"
+    
+    read -p "NPM admin subdomain [$NPM_SUBDOMAIN]: " input
+    NPM_SUBDOMAIN="${input:-$NPM_SUBDOMAIN}"
+    
+    read -p "Local backup retention (days) [$BACKUP_RETENTION]: " input
+    BACKUP_RETENTION="${input:-$BACKUP_RETENTION}"
+    
+    read -p "Remote backup retention (days) [$REMOTE_RETENTION]: " input
+    REMOTE_RETENTION="${input:-$REMOTE_RETENTION}"
+    
+    read -p "Portainer system user [$PORTAINER_USER]: " input
+    PORTAINER_USER="${input:-$PORTAINER_USER}"
+    
+    PORTAINER_URL="${PORTAINER_SUBDOMAIN}.${DOMAIN_NAME}"
+    NPM_URL="${NPM_SUBDOMAIN}.${DOMAIN_NAME}"
+    
+    # Check if any paths need migration
+    if [[ "$new_portainer_path" == "$old_portainer_path" && 
+          "$new_tools_path" == "$old_tools_path" && 
+          "$new_backup_path" == "$old_backup_path" ]]; then
+        info "No path changes detected. Updating configuration only."
+        
+        # Update paths in memory
+        PORTAINER_PATH="$new_portainer_path"
+        TOOLS_PATH="$new_tools_path"
+        BACKUP_PATH="$new_backup_path"
+        
+        save_config
+        success "Configuration updated successfully"
+        return 0
+    fi
+    
+    echo
+    printf "%b\n" "${BLUE}Migration Summary:${NC}"
+    printf "%b\n" "${YELLOW}Paths to migrate:${NC}"
+    [[ "$new_portainer_path" != "$old_portainer_path" ]] && echo "  Portainer: $old_portainer_path → $new_portainer_path"
+    [[ "$new_tools_path" != "$old_tools_path" ]] && echo "  Tools: $old_tools_path → $new_tools_path"
+    [[ "$new_backup_path" != "$old_backup_path" ]] && echo "  Backup: $old_backup_path → $new_backup_path"
+    echo
+    printf "%b\n" "${YELLOW}Migration Process:${NC}"
+    echo "1. Inventory deployed stacks via Portainer API"
+    echo "2. Create pre-migration backup"
+    echo "3. Stop services gracefully"
+    echo "4. Move data folders to new paths"
+    echo "5. Update configurations"
+    echo "6. Restart services and validate"
+    echo
+    
+    read -p "Proceed with migration? [y/N]: " confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        echo "Migration cancelled"
+        return 1
+    fi
+    
+    # Perform the migration
+    perform_path_migration "$old_portainer_path" "$new_portainer_path" "$old_tools_path" "$new_tools_path" "$old_backup_path" "$new_backup_path"
+}
+
+# Perform the actual path migration
+perform_path_migration() {
+    local old_portainer_path="$1"
+    local new_portainer_path="$2"
+    local old_tools_path="$3"
+    local new_tools_path="$4"
+    local old_backup_path="$5"
+    local new_backup_path="$6"
+    
+    local migration_log="/tmp/migration_$(date +%Y%m%d_%H%M%S).log"
+    local rollback_info="/tmp/rollback_$(date +%Y%m%d_%H%M%S).json"
+    
+    exec 3>&1 4>&2
+    exec 1> >(tee -a "$migration_log")
+    exec 2> >(tee -a "$migration_log" >&2)
+    
+    echo "=== MIGRATION STARTED: $(date) ===" 
+    
+    # Step 1: Inventory deployed stacks
+    info "Step 1: Inventorying deployed stacks..."
+    local stack_inventory="/tmp/stack_inventory_$(date +%Y%m%d_%H%M%S).json"
+    get_stack_inventory "$stack_inventory"
+    
+    local stack_count=$(jq -r '.stacks | length' "$stack_inventory" 2>/dev/null || echo "0")
+    info "Found $stack_count deployed stacks"
+    
+    # Warn about complexity if additional stacks exist
+    if [[ "$stack_count" -gt 2 ]]; then
+        warn "Found $stack_count stacks (more than basic Portainer + NPM setup)"
+        warn "This migration will be more complex and may require manual intervention"
+        echo
+        jq -r '.stacks[] | "  - \(.name) (ID: \(.id))"' "$stack_inventory" 2>/dev/null || echo "  - Unable to list stacks"
+        echo
+        read -p "Continue with complex migration? [y/N]: " complex_confirm
+        if [[ ! "$complex_confirm" =~ ^[Yy]$ ]]; then
+            error "Migration cancelled due to complexity"
+            return 1
+        fi
+    fi
+    
+    # Step 2: Create pre-migration backup
+    info "Step 2: Creating pre-migration backup..."
+    local backup_timestamp=$(date '+%Y%m%d_%H%M%S')
+    local pre_migration_backup="$old_backup_path/pre_migration_backup_${backup_timestamp}.tar.gz"
+    
+    create_migration_backup "$pre_migration_backup" "$stack_inventory"
+    
+    # Create rollback information
+    jq -n \
+        --arg old_portainer "$old_portainer_path" \
+        --arg new_portainer "$new_portainer_path" \
+        --arg old_tools "$old_tools_path" \
+        --arg new_tools "$new_tools_path" \
+        --arg old_backup "$old_backup_path" \
+        --arg new_backup "$new_backup_path" \
+        --arg backup_file "$pre_migration_backup" \
+        --arg stack_file "$stack_inventory" \
+        --arg log_file "$migration_log" \
+        '{
+            old_paths: {
+                portainer: $old_portainer,
+                tools: $old_tools,
+                backup: $old_backup
+            },
+            new_paths: {
+                portainer: $new_portainer,
+                tools: $new_tools,
+                backup: $new_backup
+            },
+            backup_file: $backup_file,
+            stack_inventory: $stack_file,
+            log_file: $log_file,
+            migration_date: now
+        }' > "$rollback_info"
+    
+    # Step 3: Stop services gracefully
+    info "Step 3: Stopping services gracefully..."
+    stop_containers_for_migration
+    
+    # Step 4: Move data folders
+    info "Step 4: Moving data folders to new paths..."
+    migrate_data_folders "$old_portainer_path" "$new_portainer_path" "$old_tools_path" "$new_tools_path" "$old_backup_path" "$new_backup_path"
+    
+    # Step 5: Update configurations
+    info "Step 5: Updating configurations..."
+    update_configurations_for_migration "$old_portainer_path" "$new_portainer_path" "$old_tools_path" "$new_tools_path" "$old_backup_path" "$new_backup_path"
+    
+    # Step 6: Restart services and validate
+    info "Step 6: Restarting services and validating..."
+    restart_and_validate_services "$stack_inventory"
+    
+    exec 1>&3 2>&4
+    exec 3>&- 4>&-
+    
+    success "Migration completed successfully!"
+    success "Rollback information saved to: $rollback_info"
+    success "Migration log saved to: $migration_log"
+    
+    info "Services should be accessible at:"
+    info "  Portainer: https://$PORTAINER_URL"
+    info "  nginx-proxy-manager: https://$NPM_URL"
+}
+
+# Get detailed stack inventory for migration
+get_stack_inventory() {
+    local output_file="$1"
+    
+    if [[ ! -f "$PORTAINER_PATH/.credentials" ]]; then
+        warn "Portainer credentials not found"
+        echo '{"stacks": []}' > "$output_file"
+        return 0
+    fi
+    
+    source "$PORTAINER_PATH/.credentials"
+    
+    # Login to Portainer API
+    local auth_response
+    auth_response=$(curl -s -X POST "$PORTAINER_API_URL/auth" \
+        -H "Content-Type: application/json" \
+        -d "{\"Username\": \"$PORTAINER_ADMIN_USERNAME\", \"Password\": \"$PORTAINER_ADMIN_PASSWORD\"}")
+    
+    local jwt_token
+    jwt_token=$(echo "$auth_response" | jq -r '.jwt // empty')
+    
+    if [[ -z "$jwt_token" ]]; then
+        warn "Failed to authenticate with Portainer API for stack inventory"
+        echo '{"stacks": []}' > "$output_file"
+        return 0
+    fi
+    
+    # Get detailed stack information
+    local stacks_response
+    stacks_response=$(curl -s -H "Authorization: Bearer $jwt_token" "$PORTAINER_API_URL/stacks")
+    
+    # Create detailed inventory
+    local stack_inventory='{"stacks": []}'
+    if [[ "$stacks_response" != "null" && -n "$stacks_response" ]]; then
+        stack_inventory=$(echo "$stacks_response" | jq '{
+            stacks: [.[] | {
+                id: .Id,
+                name: .Name,
+                status: .Status,
+                type: .Type,
+                endpoint_id: .EndpointId,
+                compose_file: .ComposeFile,
+                env_vars: .Env,
+                creation_date: .CreationDate,
+                update_date: .UpdateDate
+            }]
+        }')
+    fi
+    
+    echo "$stack_inventory" > "$output_file"
+    info "Stack inventory saved to: $output_file"
+}
+
+# Create a comprehensive backup before migration
+create_migration_backup() {
+    local backup_file="$1"
+    local stack_inventory="$2"
+    
+    info "Creating comprehensive pre-migration backup..."
+    
+    local temp_backup_dir="/tmp/pre_migration_backup_$(date +%Y%m%d_%H%M%S)"
+    mkdir -p "$temp_backup_dir"
+    
+    # Copy stack inventory
+    cp "$stack_inventory" "$temp_backup_dir/stack_inventory.json"
+    
+    # Copy current configuration
+    cp "$CONFIG_FILE" "$temp_backup_dir/config.conf"
+    
+    # Create metadata
+    jq -n \
+        --arg version "$VERSION" \
+        --arg backup_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        --arg backup_type "pre_migration" \
+        --arg portainer_path "$PORTAINER_PATH" \
+        --arg tools_path "$TOOLS_PATH" \
+        --arg backup_path "$BACKUP_PATH" \
+        '{
+            version: $version,
+            backup_date: $backup_date,
+            backup_type: $backup_type,
+            paths: {
+                portainer: $portainer_path,
+                tools: $tools_path,
+                backup: $backup_path
+            }
+        }' > "$temp_backup_dir/backup_metadata.json"
+    
+    # Create the backup archive
+    info "Creating backup archive at: $backup_file"
+    
+    # Ensure parent directory exists
+    mkdir -p "$(dirname "$backup_file")"
+    
+    # Create tar archive with preserved permissions
+    if sudo tar -czf "$backup_file" \
+        --same-owner --same-permissions \
+        -C "$PORTAINER_PATH" . \
+        -C "$TOOLS_PATH" . \
+        -C "$temp_backup_dir" . 2>/dev/null; then
+        success "Pre-migration backup created successfully"
+    else
+        error "Failed to create pre-migration backup"
+        rm -rf "$temp_backup_dir"
+        return 1
+    fi
+    
+    # Set proper ownership
+    sudo chown "$PORTAINER_USER:$PORTAINER_USER" "$backup_file"
+    
+    # Clean up temporary directory
+    rm -rf "$temp_backup_dir"
+    
+    info "Backup size: $(du -h "$backup_file" | cut -f1)"
+}
+
+# Stop containers for migration (different from regular backup)
+stop_containers_for_migration() {
+    info "Stopping containers for migration..."
+    
+    # Stop all containers except Portainer itself (we need it for API access)
+    local containers_to_stop=($(sudo -u "$PORTAINER_USER" docker ps --format "table {{.Names}}" | grep -v "^NAMES$" | grep -v "portainer"))
+    
+    for container in "${containers_to_stop[@]}"; do
+        if [[ -n "$container" ]]; then
+            info "Stopping container: $container"
+            sudo -u "$PORTAINER_USER" docker stop "$container" 2>/dev/null || warn "Failed to stop $container"
+        fi
+    done
+    
+    # Wait for containers to stop
+    sleep 5
+    
+    success "Containers stopped for migration"
+}
+
+# Move data folders to new paths
+migrate_data_folders() {
+    local old_portainer_path="$1"
+    local new_portainer_path="$2"
+    local old_tools_path="$3"
+    local new_tools_path="$4"
+    local old_backup_path="$5"
+    local new_backup_path="$6"
+    
+    # Migrate Portainer data
+    if [[ "$old_portainer_path" != "$new_portainer_path" ]]; then
+        info "Migrating Portainer data: $old_portainer_path → $new_portainer_path"
+        
+        # Create new directory
+        sudo mkdir -p "$new_portainer_path"
+        
+        # Move data with preserved permissions
+        if sudo mv "$old_portainer_path"/* "$new_portainer_path/" 2>/dev/null; then
+            # Set ownership
+            sudo chown -R "$PORTAINER_USER:$PORTAINER_USER" "$new_portainer_path"
+            
+            # Remove old directory if empty
+            sudo rmdir "$old_portainer_path" 2>/dev/null || warn "Could not remove old Portainer directory"
+            
+            success "Portainer data migrated successfully"
+        else
+            error "Failed to migrate Portainer data"
+            return 1
+        fi
+    fi
+    
+    # Migrate Tools data
+    if [[ "$old_tools_path" != "$new_tools_path" ]]; then
+        info "Migrating Tools data: $old_tools_path → $new_tools_path"
+        
+        # Create new directory
+        sudo mkdir -p "$new_tools_path"
+        
+        # Move data with preserved permissions
+        if sudo mv "$old_tools_path"/* "$new_tools_path/" 2>/dev/null; then
+            # Set ownership
+            sudo chown -R "$PORTAINER_USER:$PORTAINER_USER" "$new_tools_path"
+            
+            # Remove old directory if empty
+            sudo rmdir "$old_tools_path" 2>/dev/null || warn "Could not remove old Tools directory"
+            
+            success "Tools data migrated successfully"
+        else
+            error "Failed to migrate Tools data"
+            return 1
+        fi
+    fi
+    
+    # Migrate Backup data
+    if [[ "$old_backup_path" != "$new_backup_path" ]]; then
+        info "Migrating Backup data: $old_backup_path → $new_backup_path"
+        
+        # Create new directory
+        sudo mkdir -p "$new_backup_path"
+        
+        # Move data with preserved permissions
+        if sudo mv "$old_backup_path"/* "$new_backup_path/" 2>/dev/null; then
+            # Set ownership
+            sudo chown -R "$PORTAINER_USER:$PORTAINER_USER" "$new_backup_path"
+            
+            # Remove old directory if empty
+            sudo rmdir "$old_backup_path" 2>/dev/null || warn "Could not remove old Backup directory"
+            
+            success "Backup data migrated successfully"
+        else
+            error "Failed to migrate Backup data"
+            return 1
+        fi
+    fi
+}
+
+# Update configurations after migration
+update_configurations_for_migration() {
+    local old_portainer_path="$1"
+    local new_portainer_path="$2"
+    local old_tools_path="$3"
+    local new_tools_path="$4"
+    local old_backup_path="$5"
+    local new_backup_path="$6"
+    
+    info "Updating configurations for new paths..."
+    
+    # Update global configuration
+    PORTAINER_PATH="$new_portainer_path"
+    TOOLS_PATH="$new_tools_path"
+    BACKUP_PATH="$new_backup_path"
+    
+    # Save updated configuration
+    save_config
+    
+    # Update docker-compose files if they exist
+    local portainer_compose="$new_portainer_path/docker-compose.yml"
+    if [[ -f "$portainer_compose" ]]; then
+        info "Updating Portainer compose file paths..."
+        # Only replace path references in volume definitions, not image names
+        sudo sed -i "s|$old_portainer_path/data|$new_portainer_path/data|g" "$portainer_compose" 2>/dev/null || warn "Failed to update Portainer compose paths"
+    fi
+    
+    local npm_compose="$new_tools_path/nginx-proxy-manager/docker-compose.yml"
+    if [[ -f "$npm_compose" ]]; then
+        info "Updating NPM compose file paths..."
+        # Only replace path references in volume definitions, not image names
+        sudo sed -i "s|$old_tools_path/nginx-proxy-manager/data|$new_tools_path/nginx-proxy-manager/data|g" "$npm_compose" 2>/dev/null || warn "Failed to update NPM compose paths"
+        sudo sed -i "s|$old_tools_path/nginx-proxy-manager/letsencrypt|$new_tools_path/nginx-proxy-manager/letsencrypt|g" "$npm_compose" 2>/dev/null || warn "Failed to update NPM compose paths"
+    fi
+    
+    success "Configurations updated successfully"
+}
+
+# Restart services and validate after migration
+restart_and_validate_services() {
+    local stack_inventory="$1"
+    
+    info "Restarting services after migration..."
+    
+    # First, restart Portainer with new paths
+    info "Restarting Portainer..."
+    if sudo -u "$PORTAINER_USER" docker compose -f "$PORTAINER_PATH/docker-compose.yml" up -d; then
+        success "Portainer restarted successfully"
+    else
+        error "Failed to restart Portainer"
+        return 1
+    fi
+    
+    # Wait for Portainer to be ready
+    local max_wait=60
+    local wait_count=0
+    while [[ $wait_count -lt $max_wait ]]; do
+        if curl -s -f "http://localhost:9000/api/system/status" >/dev/null 2>&1; then
+            success "Portainer is ready"
+            break
+        fi
+        sleep 2
+        ((wait_count+=2))
+    done
+    
+    if [[ $wait_count -ge $max_wait ]]; then
+        error "Portainer failed to start within $max_wait seconds"
+        return 1
+    fi
+    
+    # Restart other services using Portainer API
+    info "Restarting other services..."
+    
+    # Get stacks from inventory and restart them
+    local stacks=$(jq -r '.stacks[] | select(.name != "portainer") | .name' "$stack_inventory" 2>/dev/null)
+    
+    if [[ -n "$stacks" ]]; then
+        while IFS= read -r stack_name; do
+            if [[ -n "$stack_name" ]]; then
+                info "Restarting stack: $stack_name"
+                restart_stack_via_api "$stack_name"
+            fi
+        done <<< "$stacks"
+    fi
+    
+    # Validate services are accessible
+    info "Validating services..."
+    
+    # Check Portainer
+    if curl -s -f "http://localhost:9000/api/system/status" >/dev/null 2>&1; then
+        success "Portainer is accessible"
+    else
+        error "Portainer is not accessible"
+        return 1
+    fi
+    
+    # Check nginx-proxy-manager
+    if curl -s -f "http://localhost:81/api/system/status" >/dev/null 2>&1; then
+        success "nginx-proxy-manager is accessible"
+    else
+        warn "nginx-proxy-manager may not be accessible (this is normal if it's not deployed yet)"
+    fi
+    
+    success "Service validation completed"
+}
+
+# Restart a stack via Portainer API
+restart_stack_via_api() {
+    local stack_name="$1"
+    
+    if [[ ! -f "$PORTAINER_PATH/.credentials" ]]; then
+        warn "Cannot restart stack $stack_name: Portainer credentials not found"
+        return 1
+    fi
+    
+    source "$PORTAINER_PATH/.credentials"
+    
+    # Login to Portainer API
+    local auth_response
+    auth_response=$(curl -s -X POST "$PORTAINER_API_URL/auth" \
+        -H "Content-Type: application/json" \
+        -d "{\"Username\": \"$PORTAINER_ADMIN_USERNAME\", \"Password\": \"$PORTAINER_ADMIN_PASSWORD\"}")
+    
+    local jwt_token
+    jwt_token=$(echo "$auth_response" | jq -r '.jwt // empty')
+    
+    if [[ -z "$jwt_token" ]]; then
+        warn "Failed to authenticate with Portainer API for stack restart"
+        return 1
+    fi
+    
+    # Find stack ID
+    local stacks_response
+    stacks_response=$(curl -s -H "Authorization: Bearer $jwt_token" "$PORTAINER_API_URL/stacks")
+    
+    local stack_id
+    stack_id=$(echo "$stacks_response" | jq -r ".[] | select(.Name == \"$stack_name\") | .Id")
+    
+    if [[ -z "$stack_id" || "$stack_id" == "null" ]]; then
+        warn "Stack $stack_name not found for restart"
+        return 1
+    fi
+    
+    # Restart stack
+    local restart_response
+    restart_response=$(curl -s -X POST -H "Authorization: Bearer $jwt_token" \
+        "$PORTAINER_API_URL/stacks/$stack_id/stop")
+    
+    sleep 5
+    
+    restart_response=$(curl -s -X POST -H "Authorization: Bearer $jwt_token" \
+        "$PORTAINER_API_URL/stacks/$stack_id/start")
+    
+    success "Stack $stack_name restarted via API"
 }
 
 # Get public IP address
@@ -339,7 +1204,7 @@ verify_dns_and_ssl() {
         echo
         info "Please add the following DNS records to your domain provider:"
         echo
-        echo -e "${BLUE}DNS Records Required:${NC}"
+        printf "%b\n" "${BLUE}DNS Records Required:${NC}"
         if [[ "$portainer_dns_ok" == false ]]; then
             echo "  A    $PORTAINER_SUBDOMAIN    $public_ip"
         fi
@@ -1169,6 +2034,114 @@ restart_stacks() {
     fi
 }
 
+# Generate metadata file for backup reliability
+generate_backup_metadata() {
+    local backup_dir="$1"
+    local metadata_file="$backup_dir/backup_metadata.json"
+    
+    info "Generating backup metadata for enhanced reliability..."
+    
+    # Ensure backup directory is writable by the portainer user
+    if [[ ! -w "$backup_dir" ]]; then
+        sudo chown "$PORTAINER_USER:$PORTAINER_USER" "$backup_dir"
+        sudo chmod 755 "$backup_dir"
+    fi
+    
+    # Load configuration if not already loaded
+    if [[ -z "${PORTAINER_PATH:-}" ]]; then
+        if [[ -f "$CONFIG_FILE" ]]; then
+            source "$CONFIG_FILE"
+        else
+            # Use defaults for test environment
+            PORTAINER_PATH="${DEFAULT_PORTAINER_PATH}"
+            TOOLS_PATH="${DEFAULT_TOOLS_PATH}"
+            BACKUP_PATH="${DEFAULT_BACKUP_PATH}"
+        fi
+    fi
+    
+    # System information
+    local system_info=$(cat << EOF
+{
+    "backup_version": "1.0",
+    "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+    "script_version": "$VERSION",
+    "system": {
+        "hostname": "$(hostname)",
+        "kernel": "$(uname -r)",
+        "architecture": "$(uname -m)",
+        "os": "$(lsb_release -d 2>/dev/null | cut -d: -f2 | sed 's/^[[:space:]]*//' || echo 'Unknown')",
+        "docker_version": "$(docker --version 2>/dev/null || echo 'Unknown')"
+    },
+    "paths": {
+        "portainer": "$PORTAINER_PATH",
+        "tools": "$TOOLS_PATH",
+        "backup": "$BACKUP_PATH"
+    },
+    "permissions": [],
+    "ownership": []
+}
+EOF
+)
+    
+    # Write base metadata (ensure directory is writable)
+    if ! echo "$system_info" > "$metadata_file" 2>/dev/null; then
+        # If direct write fails, try with sudo
+        echo "$system_info" | sudo tee "$metadata_file" > /dev/null
+        sudo chown "$PORTAINER_USER:$PORTAINER_USER" "$metadata_file"
+    fi
+    
+    # Generate detailed permissions and ownership data
+    local temp_permissions="/tmp/backup_permissions_$$"
+    local temp_ownership="/tmp/backup_ownership_$$"
+    
+    # Collect permissions and ownership for all files (only if paths exist)
+    local paths_to_scan=""
+    [[ -d "$PORTAINER_PATH" ]] && paths_to_scan="$paths_to_scan $PORTAINER_PATH"
+    [[ -d "$TOOLS_PATH" ]] && paths_to_scan="$paths_to_scan $TOOLS_PATH"
+    
+    if [[ -n "$paths_to_scan" ]]; then
+        # Use a simpler approach to avoid subshell issues
+        while IFS= read -r -d '' file; do
+            local perms=$(stat -c "%a" "$file" 2>/dev/null)
+            local owner=$(stat -c "%U" "$file" 2>/dev/null)
+            local group=$(stat -c "%G" "$file" 2>/dev/null)
+            local relative_path=$(echo "$file" | sed 's|^/||')
+            
+            echo "{\"path\": \"$relative_path\", \"permissions\": \"$perms\", \"owner\": \"$owner\", \"group\": \"$group\"}" >> "$temp_permissions"
+        done < <(find $paths_to_scan -type f -o -type d -print0 2>/dev/null)
+    fi
+    
+    # Convert to JSON arrays
+    if [[ -f "$temp_permissions" ]]; then
+        # Create proper JSON array for permissions
+        {
+            echo "["
+            sed '$!s/$/,/' "$temp_permissions"
+            echo "]"
+        } > "${temp_permissions}.json"
+        
+        # Update metadata file with permissions data
+        if jq --slurpfile perms "${temp_permissions}.json" '.permissions = $perms[0]' "$metadata_file" > "${metadata_file}.tmp" 2>/dev/null; then
+            mv "${metadata_file}.tmp" "$metadata_file"
+        else
+            # If jq fails, try with sudo
+            sudo jq --slurpfile perms "${temp_permissions}.json" '.permissions = $perms[0]' "$metadata_file" > "${metadata_file}.tmp"
+            sudo mv "${metadata_file}.tmp" "$metadata_file"
+            sudo chown "$PORTAINER_USER:$PORTAINER_USER" "$metadata_file"
+        fi
+        
+        # Cleanup
+        rm -f "$temp_permissions" "${temp_permissions}.json"
+    fi
+    
+    # Validate metadata file
+    if jq . "$metadata_file" >/dev/null 2>&1; then
+        success "Backup metadata generated successfully"
+    else
+        warn "Backup metadata may be malformed, continuing with backup"
+    fi
+}
+
 # Create backup
 create_backup() {
     info "Starting backup process..."
@@ -1184,6 +2157,9 @@ create_backup() {
     # Capture stack states before stopping containers
     get_stack_states "$temp_backup_dir/stack_states.json"
     
+    # Generate metadata file for enhanced reliability
+    generate_backup_metadata "$temp_backup_dir"
+    
     # Stop containers gracefully
     stop_containers
     
@@ -1195,16 +2171,27 @@ create_backup() {
     
     # Create backup with preserved permissions  
     cd /
-    if [[ -f "$temp_backup_dir/stack_states.json" ]]; then
-        # Create uncompressed tar first, add stack_states.json, then compress
+    if [[ -f "$temp_backup_dir/stack_states.json" ]] || [[ -f "$temp_backup_dir/backup_metadata.json" ]]; then
+        # Create uncompressed tar first, add additional files, then compress
         sudo tar --same-owner --same-permissions -cf "${final_backup_file%.gz}" \
             "$(echo $PORTAINER_PATH | sed 's|^/||')" \
             "$(echo $TOOLS_PATH | sed 's|^/||')"
-        sudo tar --same-owner --same-permissions -rf "${final_backup_file%.gz}" \
-            -C "$temp_backup_dir" stack_states.json
+        
+        # Add stack states if available
+        if [[ -f "$temp_backup_dir/stack_states.json" ]]; then
+            sudo tar --same-owner --same-permissions -rf "${final_backup_file%.gz}" \
+                -C "$temp_backup_dir" stack_states.json
+        fi
+        
+        # Add metadata file if available
+        if [[ -f "$temp_backup_dir/backup_metadata.json" ]]; then
+            sudo tar --same-owner --same-permissions -rf "${final_backup_file%.gz}" \
+                -C "$temp_backup_dir" backup_metadata.json
+        fi
+        
         sudo gzip "${final_backup_file%.gz}"
     else
-        # Create compressed tar directly if no stack_states.json
+        # Create compressed tar directly if no additional files
         sudo tar --same-owner --same-permissions -czf "$final_backup_file" \
             "$(echo $PORTAINER_PATH | sed 's|^/||')" \
             "$(echo $TOOLS_PATH | sed 's|^/||')"
@@ -1249,9 +2236,114 @@ manage_backup_retention() {
     fi
 }
 
+# Restore using metadata file for enhanced reliability
+restore_using_metadata() {
+    local metadata_file="$1"
+    
+    if [[ ! -f "$metadata_file" ]]; then
+        warn "Metadata file not found, skipping metadata-based restore"
+        return 0
+    fi
+    
+    info "Using metadata file for enhanced restoration..."
+    
+    # Check if jq is available
+    if ! command -v jq >/dev/null 2>&1; then
+        warn "jq not available, skipping metadata-based restore"
+        return 0
+    fi
+    
+    # Validate metadata file
+    if ! jq . "$metadata_file" >/dev/null 2>&1; then
+        warn "Invalid metadata file format, skipping metadata-based restore"
+        return 0
+    fi
+    
+    # Check architecture compatibility
+    local backup_arch=$(jq -r '.system.architecture // empty' "$metadata_file")
+    local current_arch=$(uname -m)
+    
+    if [[ -n "$backup_arch" && "$backup_arch" != "$current_arch" ]]; then
+        warn "Architecture mismatch detected:"
+        warn "  Backup created on: $backup_arch"
+        warn "  Current system: $current_arch"
+        warn "  Docker images may not be compatible"
+        echo
+        if ! is_test_environment; then
+            read -p "Continue with restore anyway? [y/N]: " arch_confirm
+            if [[ ! "$arch_confirm" =~ ^[Yy]$ ]]; then
+                error "Restore cancelled due to architecture mismatch"
+                return 1
+            fi
+        fi
+    fi
+    
+    # Restore permissions using metadata
+    info "Restoring permissions using metadata..."
+    
+    # Get permissions array from metadata
+    local permissions_count=$(jq '.permissions | length' "$metadata_file" 2>/dev/null || echo "0")
+    
+    if [[ "$permissions_count" -gt 0 ]] && [[ "$permissions_count" != "null" ]]; then
+        local restored_count=0
+        
+        # Process each permission entry (with a reasonable limit)
+        local max_permissions=1000
+        local actual_count=$((permissions_count > max_permissions ? max_permissions : permissions_count))
+        
+        for ((i=0; i<actual_count; i++)); do
+            # Break if this is taking too long (safety mechanism)
+            if [[ $((i % 10)) -eq 0 ]] && [[ $i -gt 0 ]]; then
+                info "Processing permission entry $i/$actual_count"
+            fi
+            
+            local path=$(jq -r ".permissions[$i].path // empty" "$metadata_file" 2>/dev/null || echo "")
+            local perms=$(jq -r ".permissions[$i].permissions // empty" "$metadata_file" 2>/dev/null || echo "")
+            local owner=$(jq -r ".permissions[$i].owner // empty" "$metadata_file" 2>/dev/null || echo "")
+            local group=$(jq -r ".permissions[$i].group // empty" "$metadata_file" 2>/dev/null || echo "")
+            
+            # Skip if path is empty
+            [[ -z "$path" ]] && continue
+            
+            # Only restore if file exists
+            if [[ -e "/$path" ]]; then
+                # Restore ownership
+                if [[ -n "$owner" && -n "$group" && "$owner" != "null" && "$group" != "null" ]]; then
+                    if id "$owner" >/dev/null 2>&1 && getent group "$group" >/dev/null 2>&1; then
+                        sudo chown "$owner:$group" "/$path" 2>/dev/null || true
+                    fi
+                fi
+                
+                # Restore permissions
+                if [[ -n "$perms" && "$perms" != "null" && "$perms" =~ ^[0-9]+$ ]]; then
+                    sudo chmod "$perms" "/$path" 2>/dev/null || true
+                fi
+                
+                ((restored_count++))
+            fi
+        done
+        
+        success "Restored permissions for $restored_count files/directories"
+    else
+        warn "No permission information found in metadata"
+    fi
+    
+    # Display backup information
+    local backup_timestamp=$(jq -r '.timestamp // empty' "$metadata_file")
+    local backup_version=$(jq -r '.script_version // empty' "$metadata_file")
+    local backup_hostname=$(jq -r '.system.hostname // empty' "$metadata_file")
+    
+    info "Backup Information:"
+    [[ -n "$backup_timestamp" ]] && info "  Created: $backup_timestamp"
+    [[ -n "$backup_version" ]] && info "  Script Version: $backup_version"
+    [[ -n "$backup_hostname" ]] && info "  Source Hostname: $backup_hostname"
+    
+    success "Metadata-based restore completed"
+}
+
 # List available backups
 list_backups() {
-    echo -e "${BLUE}Available backups:${NC}"
+    printf "%b\n" "${BLUE}Available backups:${NC}"
     echo
     
     local backups
@@ -1300,7 +2392,7 @@ restore_backup() {
     local backup_name=$(basename "$selected_backup")
     
     echo
-    echo -e "${YELLOW}WARNING: This will stop all containers and restore data from backup!${NC}"
+    printf "%b\n" "${YELLOW}WARNING: This will stop all containers and restore data from backup!${NC}"
     echo "Selected backup: $backup_name"
     echo
     read -p "Are you sure you want to continue? [y/N]: " confirm
@@ -1328,6 +2420,16 @@ restore_backup() {
     cd /
     tar --same-owner --same-permissions -xzf "$selected_backup"
     
+    # Check for metadata file and use it for enhanced restoration
+    local metadata_file="/tmp/backup_metadata.json"
+    if tar -tf "$selected_backup" | grep -q "backup_metadata.json"; then
+        tar -xzf "$selected_backup" -C /tmp backup_metadata.json 2>/dev/null || true
+        if [[ -f "$metadata_file" ]]; then
+            restore_using_metadata "$metadata_file"
+            rm -f "$metadata_file"
+        fi
+    fi
+    
     # Start containers
     start_containers
     
@@ -1351,7 +2453,7 @@ restore_backup() {
 
 # Setup backup scheduling
 setup_schedule() {
-    echo -e "${BLUE}=== Backup Scheduling Setup ===${NC}"
+    printf "%b\n" "${BLUE}=== Backup Scheduling Setup ===${NC}"
     echo
     
     echo "Current cron jobs for user $PORTAINER_USER:"
@@ -1569,12 +2671,29 @@ SSH_KEY_FILE="$TEMP_DIR/primary_key"
 
 SSH_PRIVATE_KEY_B64="__SSH_PRIVATE_KEY_B64__"
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
+# Colors for output - enable if terminal supports colors
+if [[ "${TERM:-}" == *"color"* ]] || [[ "${TERM:-}" == "xterm"* ]] || [[ "${TERM:-}" == "screen"* ]] || [[ "${TERM:-}" == "tmux"* ]]; then
+    # Known color terminals - enable colors
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[1;33m'
+    BLUE='\033[0;34m'
+    NC='\033[0m'
+elif [[ "${TERM:-}" != "dumb" ]] && command -v tput >/dev/null 2>&1 && tput colors >/dev/null 2>&1 && [[ "$(tput colors)" -ge 8 ]]; then
+    # Fallback to tput detection (removed TTY check for SSH compatibility)
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[1;33m'
+    BLUE='\033[0;34m'
+    NC='\033[0m'
+else
+    # No colors
+    RED=''
+    GREEN=''
+    YELLOW=''
+    BLUE=''
+    NC=''
+fi
 
 # Logging functions
 log() {
@@ -1582,7 +2701,7 @@ log() {
     shift
     local message="$*"
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    echo -e "${timestamp} [${level}] ${message}"
+    printf "%b\n" "${timestamp} [${level}] ${message}"
 }
 
 info() { log "INFO" "${BLUE}$*${NC}"; }
@@ -2190,29 +3309,39 @@ update_script() {
 
 # Show usage information
 usage() {
-    cat << EOF
+    printf "%b" "$(cat << EOF
 Docker Backup Manager v${VERSION}
 
-Usage: $0 {setup|backup|restore|schedule|config|generate-nas-script|update}
+Usage: $0 {setup|config|backup|restore|schedule|generate-nas-script|update}
 
-Commands:
-    setup               - Initial setup (install Docker, create user, deploy services)
-    backup              - Create backup of all data
-    restore             - Restore from backup (interactive selection)
-    schedule            - Setup automated backups
-    config              - Interactive configuration
-    generate-nas-script - Generate self-contained NAS backup script
-    update              - Update script to latest version from GitHub
+${BLUE}═══ WORKFLOW COMMANDS (in recommended order) ═══${NC}
+    ${BLUE}setup${NC}               - 🚀 Initial setup (install Docker, create user, deploy services)
+    ${BLUE}config${NC}              - ⚙️  Interactive configuration (modify settings)
+    
+    ${BLUE}backup${NC}              - 💾 Create backup of all data
+    ${BLUE}restore${NC}             - 🔄 Restore from backup (interactive selection)
+    ${BLUE}schedule${NC}            - ⏰ Setup automated backups
+    ${BLUE}generate-nas-script${NC} - 📡 Generate self-contained NAS backup script
+    
+    ${BLUE}update${NC}              - 🔄 Update script to latest version from GitHub
 
-Examples:
-    $0 setup               # First-time setup
-    $0 backup              # Create backup now
-    $0 restore             # Choose and restore backup
-    $0 schedule            # Setup cron job for backups
-    $0 generate-nas-script # Create NAS backup client script
-    $0 update              # Update to latest version
+${BLUE}═══ GETTING STARTED ═══${NC}
+    ${BLUE}$0 setup${NC}               # 🚀 First-time setup (run this first!)
+    ${BLUE}$0 config${NC}              # ⚙️  Configure or reconfigure settings
+    
+${BLUE}═══ DAILY OPERATIONS ═══${NC}
+    ${BLUE}$0 backup${NC}              # 💾 Create backup now
+    ${BLUE}$0 restore${NC}             # 🔄 Choose and restore backup
+    ${BLUE}$0 schedule${NC}            # ⏰ Setup cron job for backups
+    
+${BLUE}═══ ADVANCED FEATURES ═══${NC}
+    ${BLUE}$0 generate-nas-script${NC} # 📡 Create NAS backup client script
+    ${BLUE}$0 update${NC}              # 🔄 Update to latest version
+
+${YELLOW}💡 Note: Run 'setup' first if this is a new installation${NC}
 
 EOF
+)"
 }
 
 # Main function dispatcher
@@ -2222,7 +3351,7 @@ main() {
     
     case "${1:-}" in
         setup)
-            setup_log_file
+            install_dependencies
             configure_paths
             verify_dns_and_ssl
             install_docker
@@ -2238,24 +3367,46 @@ main() {
             success "nginx-proxy-manager admin panel: http://localhost:81"
             ;;
         backup)
+            install_dependencies
+            check_setup_required || return 1
             create_backup
             ;;
         restore)
+            install_dependencies
+            check_setup_required || return 1
             restore_backup
             ;;
         schedule)
+            install_dependencies
+            check_setup_required || return 1
             setup_schedule
             ;;
         config)
+            install_dependencies
             configure_paths
             ;;
         generate-nas-script)
+            install_dependencies
+            check_setup_required || return 1
             generate_nas_script
             ;;
         update)
+            install_dependencies
             update_script
             ;;
+        help|--help|-h)
+            usage
+            exit 0
+            ;;
+        "")
+            printf "%b\n" "${YELLOW}⚠️  No command specified${NC}"
+            echo
+            usage
+            exit 1
+            ;;
         *)
+            printf "%b\n" "${RED}❌ Unknown command: $1${NC}"
+            echo
             usage
             exit 1
             ;;

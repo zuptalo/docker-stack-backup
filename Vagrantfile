@@ -37,45 +37,17 @@ Vagrant.configure("2") do |config|
       vb.cpus = 2
     end
     
-    # Provisioning
+    # Minimal provisioning - VM setup only
     primary.vm.provision "shell", inline: <<-SHELL
       set -e
       
-      echo "=== Setting up Primary Server ==="
-      
-      # Update system
-      apt-get update
-      apt-get install -y curl wget jq openssh-server
-      
-      # Scripts are now available directly in /home/vagrant/docker-stack-backup/
-      # No need to copy - they're already mounted with proper permissions
-      
-      # Create test configuration
-      mkdir -p /etc
-      cat > /etc/backup-manager.conf << 'EOF'
-PORTAINER_PATH="/opt/portainer"
-TOOLS_PATH="/opt/tools"
-BACKUP_PATH="/opt/backup"
-BACKUP_RETENTION="3"
-REMOTE_RETENTION="30"
-DOMAIN_NAME="test.local"
-PORTAINER_SUBDOMAIN="pt"
-PORTAINER_USER="portainer"
-PORTAINER_URL="pt.test.local"
-EOF
-      
-      # Create log file
-      touch /var/log/backup-manager.log
-      chmod 666 /var/log/backup-manager.log
+      echo "=== Setting up Primary Server (VM infrastructure only) ==="
       
       # Configure passwordless sudo for vagrant user
       echo 'vagrant ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers.d/vagrant
       chmod 440 /etc/sudoers.d/vagrant
       
-      # Set environment variable for test mode
-      echo 'export DOCKER_BACKUP_TEST=true' >> /home/vagrant/.bashrc
-      
-      echo "=== Primary server setup completed ==="
+      echo "=== Primary server VM setup completed ==="
     SHELL
   end
   
@@ -97,42 +69,17 @@ EOF
       vb.cpus = 1
     end
     
-    # Provisioning
+    # Minimal provisioning - VM setup only
     remote.vm.provision "shell", inline: <<-SHELL
       set -e
       
-      echo "=== Setting up Remote Server ==="
-      
-      # Update system
-      apt-get update
-      apt-get install -y openssh-server rsync curl jq
-      
-      # Remote server ready for self-contained NAS backup script
-      # No portainer user needed - script runs as any user and connects to primary
-      
-      # Create backup directory (accessible to any user)
-      mkdir -p /opt/backup
-      chmod 755 /opt/backup
-      
-      # Create backup directory structure (like Synology NAS)
-      mkdir -p /volume1/backup/zuptalo
-      # Set proper ownership so vagrant user (who runs backup script) can write
-      chown vagrant:vagrant /volume1/backup/zuptalo
-      chown vagrant:vagrant /volume1/backup
-      chmod 755 /volume1/backup/zuptalo
-      
-      # Ensure SSH is enabled and running
-      systemctl enable ssh
-      systemctl start ssh
+      echo "=== Setting up Remote Server (VM infrastructure only) ==="
       
       # Configure passwordless sudo for vagrant user
       echo 'vagrant ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers.d/vagrant
       chmod 440 /etc/sudoers.d/vagrant
       
-      # Set environment variable for test mode
-      echo 'export DOCKER_BACKUP_TEST=true' >> /home/vagrant/.bashrc
-      
-      echo "=== Remote server setup completed ==="
+      echo "=== Remote server VM setup completed ==="
     SHELL
   end
 end
