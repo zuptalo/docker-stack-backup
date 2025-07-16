@@ -731,7 +731,70 @@ test_backup_listing() {
 }
 
 test_ssh_key_setup() {
-    [[ -f "/home/portainer/.ssh/id_rsa" ]] && [[ -f "/home/portainer/.ssh/id_rsa.pub" ]]
+    info "Testing SSH key setup for portainer user..."
+    
+    # Check if SSH keys exist (need sudo to access portainer's home directory)
+    if sudo test -f "/home/portainer/.ssh/id_rsa" && sudo test -f "/home/portainer/.ssh/id_rsa.pub"; then
+        success "SSH private and public keys exist"
+    else
+        error "SSH keys missing"
+        return 1
+    fi
+    
+    # Check if authorized_keys is set up
+    if sudo test -f "/home/portainer/.ssh/authorized_keys"; then
+        success "SSH authorized_keys file exists"
+    else
+        error "SSH authorized_keys file missing"
+        return 1
+    fi
+    
+    # Check proper permissions
+    local private_key_perms=$(sudo stat -c "%a" "/home/portainer/.ssh/id_rsa" 2>/dev/null)
+    local auth_keys_perms=$(sudo stat -c "%a" "/home/portainer/.ssh/authorized_keys" 2>/dev/null)
+    
+    if [[ "$private_key_perms" == "600" ]]; then
+        success "SSH private key has correct permissions (600)"
+    else
+        error "SSH private key has incorrect permissions: $private_key_perms (should be 600)"
+        return 1
+    fi
+    
+    if [[ "$auth_keys_perms" == "600" ]]; then
+        success "SSH authorized_keys has correct permissions (600)"
+    else
+        error "SSH authorized_keys has incorrect permissions: $auth_keys_perms (should be 600)"
+        return 1
+    fi
+    
+    # Test SSH key validation via config command (tests validation indirectly)
+    info "Testing SSH validation via config command..."
+    cd /home/vagrant/docker-stack-backup
+    if echo "" | sudo -u portainer DOCKER_BACKUP_TEST=true ./backup-manager.sh config >/dev/null 2>&1; then
+        success "SSH validation function accessible via config command"
+    else
+        warn "SSH validation test via config command failed (but SSH keys exist)"
+    fi
+    
+    # Test NAS script generation (relies on SSH keys)
+    info "Testing NAS script generation functionality..."
+    if sudo -u portainer ./backup-manager.sh generate-nas-script >/dev/null 2>&1; then
+        success "NAS script generation works with SSH keys"
+        
+        # Check if generated script exists
+        if [[ -f "/tmp/nas-backup-client.sh" ]]; then
+            success "NAS script file created successfully"
+        else
+            error "NAS script file not found after generation"
+            return 1
+        fi
+    else
+        error "NAS script generation failed"
+        return 1
+    fi
+    
+    success "SSH key setup validation passed"
+    return 0
 }
 
 test_log_files() {

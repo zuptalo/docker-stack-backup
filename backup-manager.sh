@@ -1447,27 +1447,122 @@ create_portainer_user() {
     sudo systemctl restart docker
     sleep 2
     
-    # Generate SSH key pair
-    sudo -u "$PORTAINER_USER" ssh-keygen -t rsa -b 4096 -f "/home/$PORTAINER_USER/.ssh/id_rsa" -N ""
+    # Setup SSH keys for backup functionality
+    setup_ssh_keys
+    
+    success "User $PORTAINER_USER created with SSH key pair"
+}
+
+# Setup or repair SSH keys for portainer user
+setup_ssh_keys() {
+    info "Setting up SSH keys for $PORTAINER_USER user..."
+    
+    local ssh_dir="/home/$PORTAINER_USER/.ssh"
+    local ssh_key_path="$ssh_dir/id_rsa"
+    local ssh_pub_path="$ssh_dir/id_rsa.pub"
+    local auth_keys_path="$ssh_dir/authorized_keys"
+    
+    # Ensure SSH directory exists with proper permissions
+    if [[ ! -d "$ssh_dir" ]]; then
+        sudo -u "$PORTAINER_USER" mkdir -p "$ssh_dir"
+        sudo chmod 700 "$ssh_dir"
+        info "Created SSH directory: $ssh_dir"
+    fi
+    
+    # Generate SSH key pair if it doesn't exist
+    if [[ ! -f "$ssh_key_path" ]] || [[ ! -f "$ssh_pub_path" ]]; then
+        info "Generating SSH key pair..."
+        sudo -u "$PORTAINER_USER" ssh-keygen -t rsa -b 4096 -f "$ssh_key_path" -N ""
+        success "SSH key pair generated"
+    else
+        info "SSH key pair already exists"
+    fi
     
     # Set up SSH access for backups
     if ! is_test_environment; then
         # Restricted SSH access for production
-        sudo -u "$PORTAINER_USER" tee "/home/$PORTAINER_USER/.ssh/authorized_keys" > /dev/null << EOF
+        sudo -u "$PORTAINER_USER" tee "$auth_keys_path" > /dev/null << EOF
 # Restricted key for backup access only
-command="rsync --server --daemon .",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty $(cat /home/$PORTAINER_USER/.ssh/id_rsa.pub | cut -d' ' -f1-2)
+command="rsync --server --daemon .",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty $(cat $ssh_pub_path | cut -d' ' -f1-2)
 EOF
         info "Set up restricted SSH access for production"
     else
         # Full SSH access for test environment
-        sudo -u "$PORTAINER_USER" cp "/home/$PORTAINER_USER/.ssh/id_rsa.pub" "/home/$PORTAINER_USER/.ssh/authorized_keys"
+        sudo -u "$PORTAINER_USER" cp "$ssh_pub_path" "$auth_keys_path"
         info "Set up full SSH access for test environment"
     fi
     
-    sudo chmod 600 "/home/$PORTAINER_USER/.ssh/authorized_keys"
-    sudo chown "$PORTAINER_USER:$PORTAINER_USER" "/home/$PORTAINER_USER/.ssh/authorized_keys"
+    # Set proper permissions
+    sudo chmod 600 "$ssh_key_path"
+    sudo chmod 644 "$ssh_pub_path"
+    sudo chmod 600 "$auth_keys_path"
+    sudo chown "$PORTAINER_USER:$PORTAINER_USER" "$ssh_key_path" "$ssh_pub_path" "$auth_keys_path"
     
-    success "User $PORTAINER_USER created with SSH key pair"
+    success "SSH keys setup completed"
+}
+
+# Validate SSH key setup for backup functionality
+validate_ssh_setup() {
+    info "Validating SSH key setup..."
+    
+    local ssh_key_path="/home/$PORTAINER_USER/.ssh/id_rsa"
+    local ssh_pub_path="/home/$PORTAINER_USER/.ssh/id_rsa.pub"
+    local auth_keys_path="/home/$PORTAINER_USER/.ssh/authorized_keys"
+    
+    # Check if SSH private key exists and is readable
+    if [[ ! -f "$ssh_key_path" ]]; then
+        error "SSH private key not found at: $ssh_key_path"
+        error "NAS backup functionality will not work without SSH keys"
+        return 1
+    fi
+    
+    # Check if SSH public key exists
+    if [[ ! -f "$ssh_pub_path" ]]; then
+        error "SSH public key not found at: $ssh_pub_path"
+        return 1
+    fi
+    
+    # Check if authorized_keys exists
+    if [[ ! -f "$auth_keys_path" ]]; then
+        error "SSH authorized_keys not found at: $auth_keys_path"
+        return 1
+    fi
+    
+    # Check permissions
+    local private_perms=$(stat -c "%a" "$ssh_key_path" 2>/dev/null)
+    local auth_perms=$(stat -c "%a" "$auth_keys_path" 2>/dev/null)
+    
+    if [[ "$private_perms" != "600" ]]; then
+        error "SSH private key has incorrect permissions: $private_perms (should be 600)"
+        return 1
+    fi
+    
+    if [[ "$auth_perms" != "600" ]]; then
+        error "SSH authorized_keys has incorrect permissions: $auth_perms (should be 600)"
+        return 1
+    fi
+    
+    # Test if SSH key can be read by the script
+    if ! sudo cat "$ssh_key_path" >/dev/null 2>&1; then
+        error "Cannot read SSH private key (permission issue)"
+        return 1
+    fi
+    
+    # Test SSH connectivity (basic self-connection test in test environment)
+    if is_test_environment; then
+        info "Testing SSH connectivity..."
+        if sudo -u "$PORTAINER_USER" ssh -i "$ssh_key_path" -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=no \
+           "$PORTAINER_USER@localhost" 'echo "SSH test successful"' >/dev/null 2>&1; then
+            success "SSH connectivity test passed"
+        else
+            warn "SSH connectivity test failed (this may be normal if SSH server is not configured)"
+            warn "NAS backup functionality will still work if remote SSH access is properly configured"
+        fi
+    fi
+    
+    success "SSH key setup validation passed"
+    success "NAS backup functionality will be available"
+    return 0
 }
 
 # Create required directories with proper permissions
@@ -3556,6 +3651,14 @@ main() {
             deploy_portainer
             # NPM must be deployed as a Portainer stack - no fallback
             info "nginx-proxy-manager will be configured after Portainer stack deployment"
+            
+            # Validate SSH setup for NAS backup functionality
+            if validate_ssh_setup; then
+                success "SSH key validation passed - NAS backup functionality ready"
+            else
+                warn "SSH key validation failed - NAS backup functionality may not work properly"
+            fi
+            
             success "Setup completed successfully!"
             success "Portainer available at: $PORTAINER_URL"
             success "nginx-proxy-manager admin panel: http://localhost:81"
@@ -3578,6 +3681,21 @@ main() {
         config)
             install_dependencies
             configure_paths
+            
+            # Validate SSH setup after configuration
+            if ! validate_ssh_setup 2>/dev/null; then
+                warn "SSH key validation failed"
+                if prompt_yes_no "Would you like to repair SSH key setup? (required for NAS backup functionality)" "y"; then
+                    setup_ssh_keys
+                    if validate_ssh_setup; then
+                        success "SSH key setup repaired successfully"
+                    else
+                        error "SSH key repair failed - NAS backup functionality may not work"
+                    fi
+                fi
+            else
+                success "SSH key setup is valid"
+            fi
             ;;
         generate-nas-script)
             install_dependencies
