@@ -3493,8 +3493,14 @@ EOF
 )"
 }
 
-# Parse command-line flags
-parse_flags() {
+
+# Main function dispatcher
+main() {
+    check_root
+    load_config
+    
+    # Parse flags first
+    local temp_args=()
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --yes|--auto-yes|-y)
@@ -3527,26 +3533,17 @@ parse_flags() {
                 exit 1
                 ;;
             *)
-                # Not a flag, return remaining arguments
-                break
+                # Not a flag, add to remaining arguments
+                temp_args+=("$1")
+                shift
                 ;;
         esac
     done
     
-    # Return remaining arguments
-    printf '%s\n' "$@"
-}
-
-# Main function dispatcher
-main() {
-    check_root
-    load_config
+    # Set the remaining arguments
+    set -- "${temp_args[@]}"
     
-    # Parse flags and get remaining arguments
-    local remaining_args
-    remaining_args=($(parse_flags "$@"))
-    
-    case "${remaining_args[0]:-}" in
+    case "${1:-}" in
         setup)
             install_dependencies
             configure_paths
