@@ -15,11 +15,11 @@ Vagrant.configure("2") do |config|
     primary.vm.network "private_network", ip: "192.168.56.10"
     
     # Port forwarding for services
-    primary.vm.network "forwarded_port", guest: 80, host: 8090   # nginx-proxy-manager HTTP
-    primary.vm.network "forwarded_port", guest: 443, host: 8453 # nginx-proxy-manager HTTPS
-    primary.vm.network "forwarded_port", guest: 81, host: 8091  # nginx-proxy-manager admin
-    primary.vm.network "forwarded_port", guest: 9000, host: 9001 # Portainer
-    primary.vm.network "forwarded_port", guest: 22, host: 2222, id: "ssh" # SSH for NAS testing
+    primary.vm.network "forwarded_port", guest: 80, host: 80   # nginx-proxy-manager HTTP
+    primary.vm.network "forwarded_port", guest: 443, host: 443 # nginx-proxy-manager HTTPS
+    primary.vm.network "forwarded_port", guest: 81, host: 81  # nginx-proxy-manager admin
+    primary.vm.network "forwarded_port", guest: 9000, host: 9000 # Portainer
+    primary.vm.network "forwarded_port", guest: 22, host: 22, id: "ssh" # SSH for NAS testing
     
     # Mount project directly to vagrant user's home for instant access
     primary.vm.synced_folder ".", "/home/vagrant/docker-stack-backup", type: "virtualbox", owner: "vagrant", group: "vagrant"
