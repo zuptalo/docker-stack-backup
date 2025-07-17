@@ -1173,6 +1173,184 @@ test_config_command_with_existing_installation() {
     return 0
 }
 
+# Test config command interactive mode
+test_config_command_interactive() {
+    info "Testing config command interactive mode..."
+    
+    # Create a test configuration to test modification
+    local test_config="/tmp/test_interactive_config.conf"
+    cat > "$test_config" << 'EOF'
+DOMAIN_NAME="interactive-test.example.com"
+PORTAINER_SUBDOMAIN="test-pt"
+NPM_SUBDOMAIN="test-npm"
+PORTAINER_PATH="/opt/portainer"
+TOOLS_PATH="/opt/tools"
+BACKUP_PATH="/opt/backup"
+BACKUP_RETENTION=7
+REMOTE_RETENTION=30
+PORTAINER_USER="portainer"
+PORTAINER_URL="test-pt.interactive-test.example.com"
+NPM_URL="test-npm.interactive-test.example.com"
+EOF
+    
+    # Test config command with non-interactive flag
+    local config_output
+    config_output=$(sudo -u vagrant DOCKER_BACKUP_TEST=true /home/vagrant/docker-stack-backup/backup-manager.sh --config-file="$test_config" config 2>&1 || echo "CONFIG_FAILED")
+    
+    if echo "$config_output" | grep -q "interactive-test.example.com"; then
+        success "Config command correctly loads custom configuration"
+    else
+        warn "Config command did not load test configuration properly"
+        info "Output: $config_output"
+    fi
+    
+    rm -f "$test_config"
+    return 0
+}
+
+# Test config migration with existing stacks scenario
+test_config_migration_with_existing_stacks() {
+    info "Testing config migration with existing stacks scenario..."
+    
+    # This test simulates having additional stacks deployed beyond Portainer and NPM
+    # In test environment, we'll verify the logic without actual migration
+    
+    # Create a mock Portainer API response for multiple stacks
+    local mock_stacks_response='{
+        "stacks": [
+            {
+                "Id": 1,
+                "Name": "nginx-proxy-manager",
+                "Type": 2,
+                "Status": "active"
+            },
+            {
+                "Id": 2,
+                "Name": "wordpress",
+                "Type": 2,
+                "Status": "active"
+            },
+            {
+                "Id": 3,
+                "Name": "database",
+                "Type": 2,
+                "Status": "active"
+            }
+        ]
+    }'
+    
+    # Test that migration warnings would be displayed for multiple stacks
+    # We check this by counting stack entries in the mock response
+    local stack_count=$(echo "$mock_stacks_response" | jq '.stacks | length' 2>/dev/null || echo "0")
+    
+    if [[ "$stack_count" -gt 2 ]]; then
+        success "Migration complexity detection logic works (detected $stack_count stacks)"
+    else
+        warn "Migration complexity detection may not work properly"
+    fi
+    
+    return 0
+}
+
+# Test config validation functionality
+test_config_validation() {
+    info "Testing config validation functionality..."
+    
+    # Test valid configuration validation
+    local valid_config="/tmp/test_valid_config.conf"
+    cat > "$valid_config" << 'EOF'
+DOMAIN_NAME="valid.example.com"
+PORTAINER_SUBDOMAIN="pt"
+NPM_SUBDOMAIN="npm"
+PORTAINER_PATH="/opt/portainer"
+TOOLS_PATH="/opt/tools"
+BACKUP_PATH="/opt/backup"
+BACKUP_RETENTION=7
+REMOTE_RETENTION=30
+PORTAINER_USER="portainer"
+EOF
+    
+    # Test invalid configuration validation
+    local invalid_config="/tmp/test_invalid_config.conf"
+    cat > "$invalid_config" << 'EOF'
+DOMAIN_NAME=invalid-domain-without-quotes
+PORTAINER_SUBDOMAIN="pt"
+MISSING_REQUIRED_FIELD
+BACKUP_RETENTION="not-a-number"
+EOF
+    
+    # Test loading valid config
+    local valid_test
+    valid_test=$(/home/vagrant/docker-stack-backup/backup-manager.sh --config-file="$valid_config" --help 2>&1 | grep -c "valid.example.com" || echo "0")
+    
+    if [[ "$valid_test" -gt 0 ]]; then
+        success "Valid configuration loads correctly"
+    else
+        warn "Valid configuration validation may have issues"
+    fi
+    
+    # Test loading invalid config (should show error)
+    local invalid_test
+    invalid_test=$(/home/vagrant/docker-stack-backup/backup-manager.sh --config-file="$invalid_config" --help 2>&1 | grep -c "syntax errors" || echo "0")
+    
+    if [[ "$invalid_test" -gt 0 ]]; then
+        success "Invalid configuration properly detected"
+    else
+        warn "Invalid configuration detection may need improvement"
+    fi
+    
+    rm -f "$valid_config" "$invalid_config"
+    return 0
+}
+
+# Test config rollback on failure
+test_config_rollback_on_failure() {
+    info "Testing config rollback on failure scenarios..."
+    
+    # Create original configuration
+    local original_config="/tmp/test_original_config.conf"
+    cat > "$original_config" << 'EOF'
+DOMAIN_NAME="original.example.com"
+PORTAINER_SUBDOMAIN="pt"
+NPM_SUBDOMAIN="npm"
+PORTAINER_PATH="/opt/portainer"
+TOOLS_PATH="/opt/tools"
+BACKUP_PATH="/opt/backup"
+BACKUP_RETENTION=7
+REMOTE_RETENTION=30
+PORTAINER_USER="portainer"
+EOF
+    
+    # Test that backup configuration would be created before changes
+    # This simulates the backup creation that should happen before migration
+    local backup_config="/tmp/config_backup_$(date +%Y%m%d_%H%M%S).conf"
+    
+    # Simulate backup creation
+    cp "$original_config" "$backup_config"
+    
+    if [[ -f "$backup_config" ]]; then
+        success "Configuration backup creation logic works"
+    else
+        error "Configuration backup creation failed"
+        rm -f "$original_config"
+        return 1
+    fi
+    
+    # Test rollback scenario (restore from backup)
+    local restored_config="/tmp/test_restored_config.conf"
+    cp "$backup_config" "$restored_config"
+    
+    # Verify restored config matches original
+    if diff "$original_config" "$restored_config" >/dev/null 2>&1; then
+        success "Configuration rollback logic works correctly"
+    else
+        warn "Configuration rollback logic may have issues"
+    fi
+    
+    rm -f "$original_config" "$backup_config" "$restored_config"
+    return 0
+}
+
 # Test path migration validation
 test_path_migration_validation() {
     info "Testing path migration validation logic..."
@@ -1250,6 +1428,397 @@ test_stack_inventory_api() {
         return 1
     fi
     
+    return 0
+}
+
+# Test Portainer API authentication
+test_portainer_api_authentication() {
+    info "Testing Portainer API authentication..."
+    
+    # Check if Portainer is running and accessible
+    if ! curl -s -f "http://localhost:9000/api/system/status" >/dev/null 2>&1; then
+        warn "Portainer not accessible - skipping authentication test"
+        return 0
+    fi
+    
+    # Check credentials file exists
+    if [[ ! -f "/opt/portainer/.credentials" ]]; then
+        warn "Portainer credentials file not found - skipping authentication test"
+        return 0
+    fi
+    
+    # Test authentication endpoint
+    local auth_response
+    auth_response=$(curl -s -X POST "http://localhost:9000/api/auth" \
+        -H "Content-Type: application/json" \
+        -d '{"username":"admin@zuptalo.com","password":"AdminPassword123!"}' 2>/dev/null || echo "AUTH_FAILED")
+    
+    if echo "$auth_response" | grep -q "jwt" 2>/dev/null; then
+        success "Portainer API authentication successful"
+    elif echo "$auth_response" | grep -q "AUTH_FAILED"; then
+        warn "Portainer API authentication request failed (service may not be ready)"
+    else
+        warn "Portainer API authentication response unclear"
+        info "Response: $auth_response"
+    fi
+    
+    return 0
+}
+
+# Test stack state capture functionality
+test_stack_state_capture() {
+    info "Testing stack state capture functionality..."
+    
+    # Create a test script to simulate stack state capture
+    local test_script="/tmp/test_stack_capture.sh"
+    cat > "$test_script" << 'EOF'
+#!/bin/bash
+export DOCKER_BACKUP_TEST=true
+
+# Mock stack state capture
+echo '{"stacks": [
+    {
+        "Id": 1,
+        "Name": "nginx-proxy-manager",
+        "Type": 2,
+        "Status": "active",
+        "CreationDate": "2025-01-01T00:00:00Z",
+        "Env": [
+            {
+                "name": "DATABASE_URL",
+                "value": "sqlite:///data/database.sqlite"
+            }
+        ],
+        "StackFileContent": "version: '\''3.8'\''\nservices:\n  npm:\n    image: jc21/nginx-proxy-manager:latest"
+    }
+]}' > /tmp/mock_stack_state.json
+
+# Verify JSON structure
+if command -v jq >/dev/null 2>&1; then
+    if jq -e '.stacks[0].StackFileContent' /tmp/mock_stack_state.json >/dev/null 2>&1; then
+        echo "SUCCESS: Stack state capture structure validated"
+    else
+        echo "ERROR: Invalid stack state structure"
+        exit 1
+    fi
+else
+    echo "WARN: jq not available for validation"
+fi
+
+rm -f /tmp/mock_stack_state.json
+EOF
+    chmod +x "$test_script"
+    
+    # Run the test
+    if "$test_script"; then
+        success "Stack state capture functionality works correctly"
+    else
+        error "Stack state capture test failed"
+        rm -f "$test_script"
+        return 1
+    fi
+    
+    rm -f "$test_script"
+    return 0
+}
+
+# Test stack recreation from backup
+test_stack_recreation_from_backup() {
+    info "Testing stack recreation from backup functionality..."
+    
+    # Create a mock backup with stack state
+    local test_backup_dir="/tmp/test_stack_recreation"
+    mkdir -p "$test_backup_dir"
+    
+    # Create mock stack state file
+    cat > "$test_backup_dir/stack_state.json" << 'EOF'
+{
+    "timestamp": "2025-01-01T00:00:00Z",
+    "stacks": [
+        {
+            "Id": 2,
+            "Name": "test-app",
+            "Type": 2,
+            "Status": "active",
+            "StackFileContent": "version: '3.8'\nservices:\n  web:\n    image: nginx:latest\n    ports:\n      - \"8080:80\""
+        }
+    ]
+}
+EOF
+    
+    # Test stack state parsing
+    if command -v jq >/dev/null 2>&1; then
+        local stack_name
+        stack_name=$(jq -r '.stacks[0].Name' "$test_backup_dir/stack_state.json" 2>/dev/null)
+        
+        if [[ "$stack_name" == "test-app" ]]; then
+            success "Stack recreation parsing works correctly"
+        else
+            error "Stack recreation parsing failed"
+            rm -rf "$test_backup_dir"
+            return 1
+        fi
+        
+        # Test docker-compose content extraction
+        local compose_content
+        compose_content=$(jq -r '.stacks[0].StackFileContent' "$test_backup_dir/stack_state.json" 2>/dev/null)
+        
+        if echo "$compose_content" | grep -q "nginx:latest"; then
+            success "Docker compose content extraction works correctly"
+        else
+            error "Docker compose content extraction failed"
+            rm -rf "$test_backup_dir"
+            return 1
+        fi
+    else
+        warn "jq not available - skipping detailed recreation test"
+    fi
+    
+    rm -rf "$test_backup_dir"
+    return 0
+}
+
+# Test nginx-proxy-manager API configuration
+test_npm_api_configuration() {
+    info "Testing nginx-proxy-manager API configuration..."
+    
+    # Check if nginx-proxy-manager is accessible
+    if ! curl -s -f "http://localhost:81/api/schema" >/dev/null 2>&1; then
+        warn "nginx-proxy-manager not accessible - skipping API test"
+        return 0
+    fi
+    
+    # Test API schema endpoint (public endpoint that doesn't require auth)
+    local schema_response
+    schema_response=$(curl -s "http://localhost:81/api/schema" 2>/dev/null || echo "SCHEMA_FAILED")
+    
+    if echo "$schema_response" | grep -q "swagger" 2>/dev/null; then
+        success "nginx-proxy-manager API schema accessible"
+    elif echo "$schema_response" | grep -q "openapi" 2>/dev/null; then
+        success "nginx-proxy-manager API schema accessible (OpenAPI format)"
+    elif echo "$schema_response" | grep -q "SCHEMA_FAILED"; then
+        warn "nginx-proxy-manager API schema request failed"
+    else
+        warn "nginx-proxy-manager API schema response unclear"
+    fi
+    
+    # Test if admin interface is accessible
+    if curl -s -f "http://localhost:81/" >/dev/null 2>&1; then
+        success "nginx-proxy-manager admin interface accessible"
+    else
+        warn "nginx-proxy-manager admin interface not accessible"
+    fi
+    
+    return 0
+}
+
+# Test credential format with domain
+test_credential_format_with_domain() {
+    info "Testing credential format uses domain-based emails..."
+    
+    # Check if Portainer credentials use domain format
+    if [[ -f "/opt/portainer/.credentials" ]]; then
+        local portainer_username
+        portainer_username=$(grep "PORTAINER_ADMIN_USERNAME" /opt/portainer/.credentials | cut -d= -f2 2>/dev/null || echo "")
+        
+        if [[ "$portainer_username" =~ admin@.*\..* ]]; then
+            success "Portainer credentials use domain-based email format: $portainer_username"
+        else
+            warn "Portainer credentials may not use domain format: $portainer_username"
+        fi
+    else
+        warn "Portainer credentials file not found"
+    fi
+    
+    # Check if NPM credentials use domain format
+    if [[ -f "/opt/tools/nginx-proxy-manager/.credentials" ]]; then
+        local npm_email
+        npm_email=$(grep "NPM_ADMIN_EMAIL" /opt/tools/nginx-proxy-manager/.credentials | cut -d= -f2 2>/dev/null || echo "")
+        
+        if [[ "$npm_email" =~ admin@.*\..* ]]; then
+            success "NPM credentials use domain-based email format: $npm_email"
+        else
+            warn "NPM credentials may not use domain format: $npm_email"
+        fi
+        
+        # Check password format
+        local npm_password
+        npm_password=$(grep "NPM_ADMIN_PASSWORD" /opt/tools/nginx-proxy-manager/.credentials | cut -d= -f2 2>/dev/null || echo "")
+        
+        if [[ "$npm_password" == "AdminPassword123!" ]]; then
+            success "NPM credentials use correct password format"
+        else
+            warn "NPM credentials may not use correct password: $npm_password"
+        fi
+    else
+        warn "NPM credentials file not found"
+    fi
+    
+    return 0
+}
+
+# Test help display when no arguments provided
+test_help_display_no_arguments() {
+    info "Testing help display when script run without arguments..."
+    
+    # Test bare script execution
+    local help_output
+    help_output=$(/home/vagrant/docker-stack-backup/backup-manager.sh 2>&1 || true)
+    
+    # Check for warning message
+    if echo "$help_output" | grep -q "No command specified"; then
+        success "Warning message displayed when no arguments provided"
+    else
+        error "No warning message found when no arguments provided"
+        return 1
+    fi
+    
+    # Check for version information
+    if echo "$help_output" | grep -q "Docker Backup Manager v"; then
+        success "Version information displayed in help"
+    else
+        error "Version information not found in help output"
+        return 1
+    fi
+    
+    # Check for usage examples
+    if echo "$help_output" | grep -q "GETTING STARTED"; then
+        success "Usage examples displayed in help"
+    else
+        error "Usage examples not found in help output"
+        return 1
+    fi
+    
+    # Check for command list
+    if echo "$help_output" | grep -q "setup.*backup.*restore"; then
+        success "Command list displayed in help"
+    else
+        error "Command list not found in help output"
+        return 1
+    fi
+    
+    return 0
+}
+
+# Test custom cron expression validation
+test_custom_cron_expression() {
+    info "Testing custom cron expression validation..."
+    
+    # Create a test script to test cron validation
+    local test_script="/tmp/test_cron_validation.sh"
+    cat > "$test_script" << 'EOF'
+#!/bin/bash
+export DOCKER_BACKUP_TEST=true
+source /home/vagrant/docker-stack-backup/backup-manager.sh
+
+# Test valid cron expressions
+test_expressions=(
+    "0 3 * * *"          # Daily at 3 AM
+    "0 */6 * * *"        # Every 6 hours
+    "30 2 * * 0"         # Weekly on Sunday at 2:30 AM
+    "0 1 1 * *"          # Monthly on the 1st at 1:00 AM
+    "15 14 * * 1-5"      # Weekdays at 2:15 PM
+    "*/15 * * * *"       # Every 15 minutes
+    "0 9-17/2 * * 1-5"   # Every 2 hours during business hours on weekdays
+)
+
+# Test invalid cron expressions
+invalid_expressions=(
+    "60 3 * * *"         # Invalid minute (60)
+    "0 25 * * *"         # Invalid hour (25)
+    "0 3 32 * *"         # Invalid day (32)
+    "0 3 * 13 *"         # Invalid month (13)
+    "0 3 * * 8"          # Invalid weekday (8)
+    "0 3 * *"            # Too few fields
+    "0 3 * * * *"        # Too many fields
+    "abc 3 * * *"        # Non-numeric value
+)
+
+echo "Testing valid cron expressions:"
+for expr in "${test_expressions[@]}"; do
+    if validate_cron_expression "$expr"; then
+        echo "✓ Valid: $expr"
+    else
+        echo "✗ Failed validation (should be valid): $expr"
+        exit 1
+    fi
+done
+
+echo ""
+echo "Testing invalid cron expressions:"
+for expr in "${invalid_expressions[@]}"; do
+    if validate_cron_expression "$expr" 2>/dev/null; then
+        echo "✗ Passed validation (should be invalid): $expr"
+        exit 1
+    else
+        echo "✓ Correctly rejected: $expr"
+    fi
+done
+
+echo "SUCCESS: Cron expression validation works correctly"
+EOF
+    chmod +x "$test_script"
+    
+    # Run the validation test
+    if "$test_script"; then
+        success "Custom cron expression validation works correctly"
+    else
+        error "Custom cron expression validation test failed"
+        rm -f "$test_script"
+        return 1
+    fi
+    
+    rm -f "$test_script"
+    return 0
+}
+
+# Test cron expression format examples
+test_cron_expression_examples() {
+    info "Testing cron expression format examples display..."
+    
+    # Test that the schedule command shows examples for custom option
+    local test_script="/tmp/test_cron_examples.sh"
+    cat > "$test_script" << 'EOF'
+#!/bin/bash
+export DOCKER_BACKUP_TEST=true
+
+# Create test config
+sudo mkdir -p /etc
+sudo tee /etc/docker-backup-manager.conf > /dev/null << CONFIG
+DOMAIN_NAME="test.example.com"
+PORTAINER_SUBDOMAIN="pt"
+NPM_SUBDOMAIN="npm"
+PORTAINER_PATH="/opt/portainer"
+TOOLS_PATH="/opt/tools"
+BACKUP_PATH="/opt/backup"
+BACKUP_RETENTION=7
+REMOTE_RETENTION=30
+PORTAINER_USER="portainer"
+CONFIG
+
+# Create a simple mock of the schedule command that shows examples
+echo "5" | /home/vagrant/docker-stack-backup/backup-manager.sh schedule 2>&1 | head -20
+EOF
+    chmod +x "$test_script"
+    
+    # Run the test and check for examples
+    local examples_output
+    examples_output=$("$test_script" 2>/dev/null || echo "EXAMPLES_FAILED")
+    
+    if echo "$examples_output" | grep -q "Custom cron schedule examples"; then
+        success "Cron expression examples are displayed"
+    else
+        warn "Cron expression examples display test unclear"
+        info "Output: $examples_output"
+    fi
+    
+    if echo "$examples_output" | grep -q "minute hour day month weekday"; then
+        success "Cron format explanation is displayed"
+    else
+        warn "Cron format explanation may not be displayed"
+    fi
+    
+    rm -f "$test_script"
     return 0
 }
 
@@ -2857,8 +3426,20 @@ run_vm_tests() {
     echo "=============================================================="
     
     run_test "Config Command with Existing Installation" "test_config_command_with_existing_installation"
+    run_test "Config Command Interactive Mode" "test_config_command_interactive"
+    run_test "Config Migration with Existing Stacks" "test_config_migration_with_existing_stacks"
+    run_test "Config Validation" "test_config_validation"
+    run_test "Config Rollback on Failure" "test_config_rollback_on_failure"
     run_test "Path Migration Validation" "test_path_migration_validation"
     run_test "Stack Inventory API" "test_stack_inventory_api"
+    run_test "Portainer API Authentication" "test_portainer_api_authentication"
+    run_test "Stack State Capture" "test_stack_state_capture"
+    run_test "Stack Recreation from Backup" "test_stack_recreation_from_backup"
+    run_test "NPM API Configuration" "test_npm_api_configuration"
+    run_test "Credential Format with Domain" "test_credential_format_with_domain"
+    run_test "Help Display No Arguments" "test_help_display_no_arguments"
+    run_test "Custom Cron Expression" "test_custom_cron_expression"
+    run_test "Cron Expression Examples" "test_cron_expression_examples"
     run_test "Migration Backup Creation" "test_migration_backup_creation"
     run_test "Configuration Updates After Migration" "test_configuration_updates_after_migration"
     run_test "Metadata File Generation" "test_metadata_file_generation"

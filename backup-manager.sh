@@ -472,6 +472,15 @@ setup_fixed_configuration() {
     TOOLS_PATH="/opt/tools"
     BACKUP_PATH="/opt/backup"
 
+    # Initialize domain defaults
+    DOMAIN_NAME="${DOMAIN_NAME:-$DEFAULT_DOMAIN}"
+    PORTAINER_SUBDOMAIN="${PORTAINER_SUBDOMAIN:-$DEFAULT_PORTAINER_SUBDOMAIN}"
+    NPM_SUBDOMAIN="${NPM_SUBDOMAIN:-$DEFAULT_NPM_SUBDOMAIN}"
+    
+    # Initialize other defaults
+    BACKUP_RETENTION="${BACKUP_RETENTION:-$DEFAULT_BACKUP_RETENTION}"
+    REMOTE_RETENTION="${REMOTE_RETENTION:-$DEFAULT_REMOTE_RETENTION}"
+
     # Only domain configuration is needed for SSL certificates
     if ! is_test_environment; then
         printf "%b\n" "${BLUE}=== Domain Configuration ===${NC}"
@@ -498,6 +507,10 @@ setup_fixed_configuration() {
             exit 0
         fi
     fi
+
+    # Set URLs for configuration file
+    PORTAINER_URL="${PORTAINER_SUBDOMAIN}.${DOMAIN_NAME}"
+    NPM_URL="${NPM_SUBDOMAIN}.${DOMAIN_NAME}"
 
     # Save configuration
     save_config
@@ -1699,10 +1712,12 @@ networks:
     external: true
 EOF
 
-    # Create credentials file with default values
+    # Create credentials file with domain-based values
+    local npm_admin_email="admin@${DOMAIN_NAME}"
+    local npm_admin_password="AdminPassword123!"
     sudo -u "$PORTAINER_USER" tee "$npm_path/.credentials" > /dev/null << EOF
-NPM_ADMIN_EMAIL=admin@example.com
-NPM_ADMIN_PASSWORD=changeme
+NPM_ADMIN_EMAIL=${npm_admin_email}
+NPM_ADMIN_PASSWORD=${npm_admin_password}
 NPM_API_URL=http://localhost:81/api
 EOF
 
@@ -1925,8 +1940,9 @@ EOF
 
     # Create credentials file with setup credentials (meeting Portainer requirements)
     local portainer_admin_password="AdminPassword123!"
+    local portainer_admin_username="admin@${DOMAIN_NAME}"
     sudo -u "$PORTAINER_USER" tee "$PORTAINER_PATH/.credentials" > /dev/null << EOF
-PORTAINER_ADMIN_USERNAME=admin
+PORTAINER_ADMIN_USERNAME=${portainer_admin_username}
 PORTAINER_ADMIN_PASSWORD=${portainer_admin_password}
 PORTAINER_URL=https://${PORTAINER_URL}
 PORTAINER_API_URL=http://localhost:9000/api
@@ -2735,6 +2751,129 @@ restore_backup() {
     info "Note: Services may take a few minutes to fully initialize"
 }
 
+# Validate cron expression format
+validate_cron_expression() {
+    local cron_expr="$1"
+    
+    # Remove extra whitespace and split into fields
+    cron_expr=$(echo "$cron_expr" | tr -s ' ')
+    local fields=($cron_expr)
+    
+    # Check if we have exactly 5 fields
+    if [[ ${#fields[@]} -ne 5 ]]; then
+        error "Cron expression must have exactly 5 fields (minute hour day month weekday)"
+        return 1
+    fi
+    
+    local minute="${fields[0]}"
+    local hour="${fields[1]}"
+    local day="${fields[2]}"
+    local month="${fields[3]}"
+    local weekday="${fields[4]}"
+    
+    # Validate each field using cron field validation
+    if ! validate_cron_field "$minute" 0 59 "minute"; then
+        return 1
+    fi
+    
+    if ! validate_cron_field "$hour" 0 23 "hour"; then
+        return 1
+    fi
+    
+    if ! validate_cron_field "$day" 1 31 "day"; then
+        return 1
+    fi
+    
+    if ! validate_cron_field "$month" 1 12 "month"; then
+        return 1
+    fi
+    
+    if ! validate_cron_field "$weekday" 0 7 "weekday"; then
+        return 1
+    fi
+    
+    return 0
+}
+
+# Validate individual cron field
+validate_cron_field() {
+    local field="$1"
+    local min_val="$2"
+    local max_val="$3"
+    local field_name="$4"
+    
+    # Handle wildcard
+    if [[ "$field" == "*" ]]; then
+        return 0
+    fi
+    
+    # Handle step values (e.g., */6, 2-10/2)
+    if [[ "$field" =~ ^(.+)/([0-9]+)$ ]]; then
+        local base_field="${BASH_REMATCH[1]}"
+        local step="${BASH_REMATCH[2]}"
+        
+        # Validate step value
+        if [[ $step -lt 1 ]]; then
+            error "Step value must be at least 1 for $field_name"
+            return 1
+        fi
+        
+        # Recursively validate the base field
+        if ! validate_cron_field "$base_field" "$min_val" "$max_val" "$field_name"; then
+            return 1
+        fi
+        
+        return 0
+    fi
+    
+    # Handle ranges (e.g., 1-5, 10-20)
+    if [[ "$field" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+        local start="${BASH_REMATCH[1]}"
+        local end="${BASH_REMATCH[2]}"
+        
+        if [[ $start -lt $min_val || $start -gt $max_val ]]; then
+            error "Range start $start is out of bounds for $field_name ($min_val-$max_val)"
+            return 1
+        fi
+        
+        if [[ $end -lt $min_val || $end -gt $max_val ]]; then
+            error "Range end $end is out of bounds for $field_name ($min_val-$max_val)"
+            return 1
+        fi
+        
+        if [[ $start -gt $end ]]; then
+            error "Range start $start cannot be greater than end $end for $field_name"
+            return 1
+        fi
+        
+        return 0
+    fi
+    
+    # Handle comma-separated lists (e.g., 1,3,5)
+    if [[ "$field" =~ , ]]; then
+        local IFS=','
+        local values=($field)
+        for value in "${values[@]}"; do
+            if ! validate_cron_field "$value" "$min_val" "$max_val" "$field_name"; then
+                return 1
+            fi
+        done
+        return 0
+    fi
+    
+    # Handle single number
+    if [[ "$field" =~ ^[0-9]+$ ]]; then
+        if [[ $field -lt $min_val || $field -gt $max_val ]]; then
+            error "Value $field is out of bounds for $field_name ($min_val-$max_val)"
+            return 1
+        fi
+        return 0
+    fi
+    
+    error "Invalid format '$field' for $field_name"
+    return 1
+}
+
 # Setup backup scheduling
 setup_schedule() {
     printf "%b\n" "${BLUE}=== Backup Scheduling Setup ===${NC}"
@@ -2816,12 +2955,44 @@ setup_schedule() {
             ;;
         5)
             echo
-            echo "Enter cron schedule (e.g., '0 3 * * *' for daily at 3 AM):"
-            if is_test_environment && [[ ! -t 0 ]]; then
-                # Non-interactive mode - read from stdin
-                read cron_schedule
-            else
-                read -p "Cron schedule: " cron_schedule
+            echo "Custom cron schedule examples:"
+            echo "  '0 3 * * *'     - Daily at 3:00 AM"
+            echo "  '0 */6 * * *'   - Every 6 hours"
+            echo "  '30 2 * * 0'    - Weekly on Sunday at 2:30 AM"
+            echo "  '0 1 1 * *'     - Monthly on the 1st at 1:00 AM"
+            echo "  '15 14 * * 1-5' - Weekdays at 2:15 PM"
+            echo
+            echo "Format: minute hour day month weekday"
+            echo "  minute: 0-59, hour: 0-23, day: 1-31, month: 1-12, weekday: 0-7 (0=Sunday)"
+            echo
+            
+            local valid_cron=false
+            local attempts=0
+            local max_attempts=3
+            
+            while [[ "$valid_cron" == false && $attempts -lt $max_attempts ]]; do
+                if is_test_environment && [[ ! -t 0 ]]; then
+                    # Non-interactive mode - read from stdin
+                    read cron_schedule
+                    valid_cron=true  # Skip validation in test mode
+                else
+                    read -p "Enter cron schedule: " cron_schedule
+                    
+                    if validate_cron_expression "$cron_schedule"; then
+                        valid_cron=true
+                    else
+                        ((attempts++))
+                        if [[ $attempts -lt $max_attempts ]]; then
+                            warn "Invalid cron expression. Please try again ($attempts/$max_attempts attempts used)."
+                            echo
+                        fi
+                    fi
+                fi
+            done
+            
+            if [[ "$valid_cron" == false ]]; then
+                error "Failed to enter valid cron expression after $max_attempts attempts"
+                return 1
             fi
             ;;
         6)
@@ -3710,13 +3881,15 @@ main() {
     check_root
     
     # Set the remaining arguments
-    set -- "${temp_args[@]}"
+    if [[ ${#temp_args[@]} -gt 0 ]]; then
+        set -- "${temp_args[@]}"
+    else
+        set --
+    fi
     
-    # Load configuration after flags are parsed
-    load_config
-
     case "${1:-}" in
         setup)
+            # Setup doesn't need to load config - it creates it
             install_dependencies
             setup_fixed_configuration
             verify_dns_and_ssl
@@ -3742,21 +3915,25 @@ main() {
             ;;
         backup)
             install_dependencies
+            load_config
             check_setup_required || return 1
             create_backup
             ;;
         restore)
             install_dependencies
+            load_config
             check_setup_required || return 1
             restore_backup
             ;;
         schedule)
             install_dependencies
+            load_config
             check_setup_required || return 1
             setup_schedule
             ;;
         config)
             install_dependencies
+            load_config
             interactive_setup_configuration
             
             # Validate SSH setup after configuration
@@ -3776,6 +3953,7 @@ main() {
             ;;
         generate-nas-script)
             install_dependencies
+            load_config
             check_setup_required || return 1
             generate_nas_script
             ;;
