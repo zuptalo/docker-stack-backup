@@ -1257,7 +1257,14 @@ check_dns_resolution() {
     
     # Try dig first (more reliable) with timeout
     if command -v dig >/dev/null 2>&1; then
-        resolved_ip=$(timeout "$timeout_seconds" dig +short "$domain" A 2>/dev/null | head -1 || echo "")
+        # Use dig to resolve through CNAME records to get final IP
+        resolved_ip=$(timeout "$timeout_seconds" dig +short "$domain" 2>/dev/null | tail -1 || echo "")
+        
+        # If the result doesn't look like an IP (e.g., it's a CNAME), resolve it further
+        if [[ -n "$resolved_ip" ]] && [[ ! "$resolved_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            # Result is likely a CNAME, resolve it to IP
+            resolved_ip=$(timeout "$timeout_seconds" dig +short "$resolved_ip" A 2>/dev/null | head -1 || echo "")
+        fi
     elif command -v nslookup >/dev/null 2>&1; then
         resolved_ip=$(timeout "$timeout_seconds" nslookup "$domain" 2>/dev/null | grep -A1 "^Name:" | grep "Address:" | awk '{print $2}' | head -1 || echo "")
     fi
