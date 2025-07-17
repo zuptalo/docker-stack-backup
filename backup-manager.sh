@@ -3716,7 +3716,7 @@ main() {
     case "${1:-}" in
         setup)
             install_dependencies
-            configure_paths
+            setup_fixed_configuration
             verify_dns_and_ssl
             install_docker
             create_portainer_user
@@ -3755,7 +3755,7 @@ main() {
             ;;
         config)
             install_dependencies
-            configure_paths
+            interactive_setup_configuration
             
             # Validate SSH setup after configuration
             if ! validate_ssh_setup 2>/dev/null; then
