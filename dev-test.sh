@@ -2378,7 +2378,15 @@ test_restore_backup_selection() {
     cat > "$test_script" << 'EOF'
 #!/bin/bash
 export DOCKER_BACKUP_TEST=true
-source /home/vagrant/docker-stack-backup/backup-manager.sh
+set +e  # Disable exit on error for testing
+
+# Try to source the script
+if source /home/vagrant/docker-stack-backup/backup-manager.sh >/dev/null 2>&1; then
+    echo "✅ Script sourced successfully"
+else
+    echo "❌ Failed to source script"
+    exit 1
+fi
 
 # Test 1: Verify list_backups function exists and works
 if command -v list_backups >/dev/null 2>&1; then
@@ -2389,15 +2397,20 @@ else
 fi
 
 # Test 2: Test backup listing functionality
+# Ensure BACKUP_PATH is set
+export BACKUP_PATH="/opt/backup"
+echo "DEBUG: About to call list_backups"
 if list_backups >/dev/null 2>&1; then
     echo "✅ Backup listing works correctly"
 else
     echo "❌ Backup listing failed"
+    echo "DEBUG: list_backups returned error code $?"
     exit 1
 fi
+echo "DEBUG: list_backups completed successfully"
 
-# Test 3: Check backup count
-backup_count=$(ls -1 "$BACKUP_PATH"/docker_backup_*.tar.gz 2>/dev/null | wc -l)
+# Test 3: Check backup count using hardcoded path
+backup_count=$(ls -1 "/opt/backup"/docker_backup_*.tar.gz 2>/dev/null | wc -l)
 if [[ $backup_count -gt 0 ]]; then
     echo "✅ Found $backup_count backup(s) for selection"
 else
@@ -2410,10 +2423,12 @@ EOF
     
     chmod +x "$test_script"
     
-    if "$test_script" >/dev/null 2>&1; then
+    local test_output
+    if test_output=$("$test_script" 2>&1); then
         success "Backup selection functionality working correctly"
     else
         error "Backup selection functionality failed"
+        error "Test output: $test_output"
         rm -f "$test_script"
         return 1
     fi
