@@ -400,15 +400,15 @@ load_config() {
             error "Configuration file not found: $CONFIG_FILE"
             exit 1
         fi
-        
+
         info "Loading configuration from: $CONFIG_FILE"
-        
+
         # Validate and source the config file safely
         if ! bash -n "$CONFIG_FILE" 2>/dev/null; then
             error "Configuration file has syntax errors: $CONFIG_FILE"
             exit 1
         fi
-        
+
         source "$CONFIG_FILE"
         info "Configuration loaded successfully"
     elif [[ -f "/etc/docker-backup-manager.conf" ]]; then
@@ -462,24 +462,46 @@ EOF
     success "Configuration saved to $CONFIG_FILE"
 }
 
-# Interactive configuration
-configure_paths() {
-    # Skip interactive configuration in test environment
-    if is_test_environment; then
-        info "Skipping interactive configuration in test environment"
-        save_config
-        return 0
+# Simple fixed configuration - no customization needed
+setup_fixed_configuration() {
+    info "Setting up Docker Backup Manager with default configuration..."
+
+    # Use fixed default paths - no customization
+    PORTAINER_USER="portainer"
+    PORTAINER_PATH="/opt/portainer"
+    TOOLS_PATH="/opt/tools"
+    BACKUP_PATH="/opt/backup"
+
+    # Only domain configuration is needed for SSL certificates
+    if ! is_test_environment; then
+        printf "%b\n" "${BLUE}=== Domain Configuration ===${NC}"
+        echo "Configure your domain for SSL certificates and service access."
+        echo
+
+        DOMAIN_NAME=$(prompt_user "Domain name (e.g., example.com)" "$DOMAIN_NAME")
+        PORTAINER_SUBDOMAIN=$(prompt_user "Portainer subdomain" "$PORTAINER_SUBDOMAIN")
+        NPM_SUBDOMAIN=$(prompt_user "NPM admin subdomain" "$NPM_SUBDOMAIN")
+
+        echo
+        printf "%b\n" "${BLUE}Configuration summary:${NC}"
+        echo "  • System user: $PORTAINER_USER (fixed)"
+        echo "  • Portainer path: $PORTAINER_PATH (fixed)"
+        echo "  • Tools path: $TOOLS_PATH (fixed)"
+        echo "  • Backup path: $BACKUP_PATH (fixed)"
+        echo "  • Domain: $DOMAIN_NAME"
+        echo "  • Portainer URL: https://$PORTAINER_SUBDOMAIN.$DOMAIN_NAME"
+        echo "  • NPM admin URL: https://$NPM_SUBDOMAIN.$DOMAIN_NAME"
+        echo
+
+        if ! prompt_yes_no "Continue with this configuration?" "y"; then
+            info "Setup cancelled by user"
+            exit 0
+        fi
     fi
-    
-    # Check if this is an existing installation
-    if [[ -f "$CONFIG_FILE" ]]; then
-        info "Existing configuration found - entering path migration mode"
-        migrate_paths
-        return 0
-    fi
-    
-    # Initial setup configuration with user choice
-    interactive_setup_configuration
+
+    # Save configuration
+    save_config
+    info "Configuration saved successfully"
 }
 
 # Interactive setup configuration with user choice
@@ -1447,7 +1469,7 @@ create_portainer_user() {
     
     if id "$PORTAINER_USER" >/dev/null 2>&1; then
         success "User $PORTAINER_USER already exists"
-        
+
         # Ensure SSH keys are set up even for existing user
         setup_ssh_keys
         success "SSH key setup verified for existing user"
@@ -3614,7 +3636,7 @@ ${BLUE}═══ ADVANCED FEATURES ═══${NC}
 ${BLUE}═══ NON-INTERACTIVE USAGE ═══${NC}
     ${BLUE}$0 --non-interactive --yes setup${NC}
     ${BLUE}$0 --config-file=/path/to/config.conf setup${NC}
-    
+
     ${YELLOW}Example config file (/etc/docker-backup-manager.conf):${NC}
     ${GREEN}DOMAIN_NAME="example.com"${NC}
     ${GREEN}PORTAINER_SUBDOMAIN="pt"${NC}
@@ -3633,9 +3655,7 @@ EOF
 
 # Main function dispatcher
 main() {
-    check_root
-    
-    # Parse flags first
+    # Parse flags first - help should work even as root
     local temp_args=()
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -3684,12 +3704,15 @@ main() {
         esac
     done
     
+    # Check root after flag parsing (help should work even as root)
+    check_root
+    
     # Set the remaining arguments
     set -- "${temp_args[@]}"
     
     # Load configuration after flags are parsed
     load_config
-    
+
     case "${1:-}" in
         setup)
             install_dependencies

@@ -9,3 +9,9 @@ backup/
 
 # Generated NAS scripts during testing
 nas-backup-client.sh
+
+# Test backup directory (used when running NAS script locally)
+backup/
+
+# Generated NAS scripts during testing
+nas-backup-client.sh
