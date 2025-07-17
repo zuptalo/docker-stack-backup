@@ -6,7 +6,7 @@ set -euo pipefail
 # Comprehensive script for Docker-based deployment backup and management
 # Compatible with Ubuntu 24.04
 
-VERSION="2025.07.17.2257"
+VERSION="2025.07.17.2250"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_FILE="/var/log/docker-backup-manager.log"
 
@@ -3571,39 +3571,13 @@ compare_versions() {
     local version1="$1"
     local version2="$2"
     
-    # Remove 'v' prefix if present
-    version1=$(echo "$version1" | sed 's/^v//')
-    version2=$(echo "$version2" | sed 's/^v//')
-    
-    # Handle legacy semantic versions (X.Y.Z) by treating them as older than any date
-    if [[ "$version1" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        # version1 is semantic (old), version2 should be date-based (newer)
-        return 2  # version1 < version2
-    elif [[ "$version2" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        # version2 is semantic (old), version1 should be date-based (newer) 
-        return 1  # version1 > version2
-    fi
-    
-    # Both are date-based (YYYY.MM.DD.HHMM or YYYY.MM.DD), convert to comparable format
-    local date1=$(echo "$version1" | tr -d '.')
-    local date2=$(echo "$version2" | tr -d '.')
-    
-    # Pad shorter format (YYYY.MM.DD) to match longer format (YYYY.MM.DD.HHMM)
-    # This ensures backward compatibility with YYYY.MM.DD format
-    if [[ ${#date1} -eq 8 ]]; then
-        date1="${date1}0000"  # Add 0000 for midnight
-    fi
-    if [[ ${#date2} -eq 8 ]]; then
-        date2="${date2}0000"  # Add 0000 for midnight
-    fi
-    
-    # String comparison of date strings (safer than arithmetic for large numbers)
-    if [[ "$date1" > "$date2" ]]; then
-        return 1  # version1 > version2
-    elif [[ "$date1" < "$date2" ]]; then
-        return 2  # version1 < version2
-    else
+    # Simple string comparison for now to isolate the issue
+    if [[ "$version1" == "$version2" ]]; then
         return 0  # versions are equal
+    elif [[ "$version1" < "$version2" ]]; then
+        return 2  # version1 < version2 (update available)
+    else
+        return 1  # version1 > version2 (newer than latest)
     fi
 }
 
@@ -3706,28 +3680,23 @@ update_script() {
     info "Current version: $VERSION"
     info "Latest version: $latest_version"
     
-    # Compare versions
-    compare_versions "$VERSION" "$latest_version"
-    local comparison=$?
-    
-    case $comparison in
-        0)
-            success "You are already running the latest version ($VERSION)"
-            return 0
-            ;;
-        1)
-            warn "You are running a newer version ($VERSION) than the latest release ($latest_version)"
-            warn "This might be a development version"
+    # Simple version comparison
+    if [[ "$VERSION" == "$latest_version" ]]; then
+        success "You are already running the latest version ($VERSION)"
+        return 0
+    elif [[ "$VERSION" > "$latest_version" ]]; then
+        warn "You are running a newer version ($VERSION) than the latest release ($latest_version)"
+        if [[ "${AUTO_YES:-false}" != "true" ]]; then
             read -p "Continue with update anyway? [y/N]: " continue_update
             if [[ ! "$continue_update" =~ ^[Yy]$ ]]; then
                 info "Update cancelled"
                 return 0
             fi
-            ;;
-        2)
-            info "Update available: $VERSION → $latest_version"
-            ;;
-    esac
+        fi
+    else
+        info "Update available: $VERSION → $latest_version"
+    fi
+    
     
     # Download latest version
     local temp_file
