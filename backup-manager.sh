@@ -528,7 +528,13 @@ interactive_setup_configuration() {
     echo "4) Exit setup"
     echo
     
-    read -p "Choose setup option [1-4]: " setup_choice
+    # In test environment, automatically choose option 1 (default configuration)
+    if is_test_environment; then
+        setup_choice="1"
+        info "Test environment: automatically choosing default configuration"
+    else
+        read -p "Choose setup option [1-4]: " setup_choice
+    fi
     
     case "$setup_choice" in
         1)
@@ -1514,14 +1520,10 @@ setup_ssh_keys() {
         info "Created SSH directory: $ssh_dir"
     fi
     
-    # Generate SSH key pair if it doesn't exist
-    if [[ ! -f "$ssh_key_path" ]] || [[ ! -f "$ssh_pub_path" ]]; then
-        info "Generating SSH key pair..."
-        sudo -u "$PORTAINER_USER" ssh-keygen -t rsa -b 4096 -f "$ssh_key_path" -N ""
-        success "SSH key pair generated"
-    else
-        info "SSH key pair already exists"
-    fi
+    # Generate SSH key pair (always regenerate for clean setup)
+    info "Generating SSH key pair..."
+    sudo -u "$PORTAINER_USER" ssh-keygen -t rsa -b 4096 -f "$ssh_key_path" -N "" -y
+    success "SSH key pair generated"
     
     # Set up SSH access for backups
     if ! is_test_environment; then

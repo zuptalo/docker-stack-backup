@@ -2367,7 +2367,8 @@ test_restore_backup_selection() {
     info "Testing restore backup selection functionality..."
     
     # Ensure we have at least one backup
-    if [[ ! -d "$BACKUP_PATH" ]] || [[ -z "$(ls -A "$BACKUP_PATH"/docker_backup_*.tar.gz 2>/dev/null)" ]]; then
+    local backup_path="/opt/backup"
+    if [[ ! -d "$backup_path" ]] || [[ -z "$(ls -A "$backup_path"/docker_backup_*.tar.gz 2>/dev/null)" ]]; then
         error "No backups found for selection test"
         return 1
     fi
@@ -2427,7 +2428,7 @@ test_restore_with_stack_state() {
     
     # Find the latest backup
     local latest_backup
-    latest_backup=$(ls -1t "$BACKUP_PATH"/docker_backup_*.tar.gz 2>/dev/null | head -1)
+    latest_backup=$(ls -1t "/opt/backup"/docker_backup_*.tar.gz 2>/dev/null | head -1)
     
     if [[ -z "$latest_backup" ]]; then
         error "No backup found for stack state test"
