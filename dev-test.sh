@@ -2382,6 +2382,147 @@ EOF
     return 0
 }
 
+# Test restore backup selection functionality
+test_restore_backup_selection() {
+    info "Testing restore backup selection functionality..."
+    
+    # Ensure we have at least one backup
+    if [[ ! -d "$BACKUP_PATH" ]] || [[ -z "$(ls -A "$BACKUP_PATH"/docker_backup_*.tar.gz 2>/dev/null)" ]]; then
+        error "No backups found for selection test"
+        return 1
+    fi
+    
+    # Test the list_backups function
+    local test_script="/tmp/test_backup_selection.sh"
+    cat > "$test_script" << 'EOF'
+#!/bin/bash
+export DOCKER_BACKUP_TEST=true
+source /home/vagrant/docker-stack-backup/backup-manager.sh
+
+# Test 1: Verify list_backups function exists and works
+if command -v list_backups >/dev/null 2>&1; then
+    echo "✅ list_backups function is available"
+else
+    echo "❌ list_backups function not found"
+    exit 1
+fi
+
+# Test 2: Test backup listing functionality
+if list_backups >/dev/null 2>&1; then
+    echo "✅ Backup listing works correctly"
+else
+    echo "❌ Backup listing failed"
+    exit 1
+fi
+
+# Test 3: Check backup count
+backup_count=$(ls -1 "$BACKUP_PATH"/docker_backup_*.tar.gz 2>/dev/null | wc -l)
+if [[ $backup_count -gt 0 ]]; then
+    echo "✅ Found $backup_count backup(s) for selection"
+else
+    echo "❌ No backups found for selection"
+    exit 1
+fi
+
+echo "✅ All backup selection tests passed"
+EOF
+    
+    chmod +x "$test_script"
+    
+    if "$test_script" >/dev/null 2>&1; then
+        success "Backup selection functionality working correctly"
+    else
+        error "Backup selection functionality failed"
+        rm -f "$test_script"
+        return 1
+    fi
+    
+    rm -f "$test_script"
+    return 0
+}
+
+# Test restore with stack state functionality
+test_restore_with_stack_state() {
+    info "Testing restore with stack state functionality..."
+    
+    # Find the latest backup
+    local latest_backup
+    latest_backup=$(ls -1t "$BACKUP_PATH"/docker_backup_*.tar.gz 2>/dev/null | head -1)
+    
+    if [[ -z "$latest_backup" ]]; then
+        error "No backup found for stack state test"
+        return 1
+    fi
+    
+    local test_script="/tmp/test_stack_state.sh"
+    cat > "$test_script" << 'EOF'
+#!/bin/bash
+export DOCKER_BACKUP_TEST=true
+source /home/vagrant/docker-stack-backup/backup-manager.sh
+
+backup_file="$1"
+
+# Test 1: Check if backup contains stack state information
+if tar -tf "$backup_file" | grep -q "stack_states.json"; then
+    echo "✅ Backup contains stack state information"
+    
+    # Test 2: Extract and validate stack state file
+    temp_dir="/tmp/test_stack_state_$$"
+    mkdir -p "$temp_dir"
+    
+    if tar -xzf "$backup_file" -C "$temp_dir" stack_states.json 2>/dev/null; then
+        if [[ -f "$temp_dir/stack_states.json" ]]; then
+            echo "✅ Stack state file extracted successfully"
+            
+            # Test 3: Validate JSON format
+            if jq . "$temp_dir/stack_states.json" >/dev/null 2>&1; then
+                echo "✅ Stack state file is valid JSON"
+            else
+                echo "❌ Stack state file has invalid JSON format"
+                rm -rf "$temp_dir"
+                exit 1
+            fi
+        else
+            echo "❌ Stack state file extraction failed"
+            rm -rf "$temp_dir"
+            exit 1
+        fi
+    else
+        echo "❌ Failed to extract stack state file"
+        rm -rf "$temp_dir"
+        exit 1
+    fi
+    
+    rm -rf "$temp_dir"
+else
+    echo "⚠️  Backup does not contain stack state information (older backup format)"
+fi
+
+# Test 4: Check if restart_stacks function exists
+if command -v restart_stacks >/dev/null 2>&1; then
+    echo "✅ restart_stacks function is available"
+else
+    echo "❌ restart_stacks function not found"
+    exit 1
+fi
+
+echo "✅ All stack state tests passed"
+EOF
+    
+    chmod +x "$test_script"
+    
+    if "$test_script" "$latest_backup" >/dev/null 2>&1; then
+        success "Stack state restoration functionality working correctly"
+    else
+        error "Stack state restoration functionality failed"
+        rm -f "$test_script"
+        return 1
+    fi
+    
+    rm -f "$test_script"
+    return 0
+}
+
 # Test interactive prompt timeout functionality
 test_prompt_timeout() {
     info "Testing prompt timeout functionality..."
@@ -2729,6 +2870,8 @@ run_vm_tests() {
     run_test "Restore with Metadata" "test_restore_with_metadata"
     run_test "Restore Permission Handling" "test_restore_permission_handling"
     run_test "Restore Interactive Timeout" "test_restore_interactive_timeout"
+    run_test "Restore Backup Selection" "test_restore_backup_selection"
+    run_test "Restore with Stack State" "test_restore_with_stack_state"
     run_test "Architecture Detection" "test_architecture_detection"
     
     info "🔧 PHASE 6: CUSTOM CONFIGURATION TESTING"
