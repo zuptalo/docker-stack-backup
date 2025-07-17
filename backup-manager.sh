@@ -6,7 +6,7 @@ set -euo pipefail
 # Comprehensive script for Docker-based deployment backup and management
 # Compatible with Ubuntu 24.04
 
-VERSION="2025.07.17.2246"
+VERSION="2025.07.17.2255"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_FILE="/var/log/docker-backup-manager.log"
 
@@ -3597,10 +3597,10 @@ compare_versions() {
         date2="${date2}0000"  # Add 0000 for midnight
     fi
     
-    # Numeric comparison of date strings
-    if (( date1 > date2 )); then
+    # String comparison of date strings (safer than arithmetic for large numbers)
+    if [[ "$date1" > "$date2" ]]; then
         return 1  # version1 > version2
-    elif (( date1 < date2 )); then
+    elif [[ "$date1" < "$date2" ]]; then
         return 2  # version1 < version2
     else
         return 0  # versions are equal
