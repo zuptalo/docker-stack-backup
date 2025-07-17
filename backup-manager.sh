@@ -1821,6 +1821,21 @@ configure_nginx_proxy_manager() {
                 }" >/dev/null
             
             success "Updated admin user profile and password"
+            
+            # Get new authentication token with updated credentials
+            info "Re-authenticating with updated credentials..."
+            local new_token
+            new_token=$(curl -s -X POST "http://localhost:81/api/tokens" \
+                -H "Content-Type: application/json" \
+                -d "{\"identity\": \"$NPM_ADMIN_EMAIL\", \"secret\": \"$NPM_ADMIN_PASSWORD\"}" | \
+                jq -r '.token // empty')
+            
+            if [[ -n "$new_token" ]]; then
+                success "Re-authenticated successfully with updated credentials"
+                token="$new_token"
+            else
+                warn "Re-authentication failed, using original token"
+            fi
         fi
     fi
     
