@@ -2282,7 +2282,7 @@ if tar -xzf "$backup_file" -C "$temp_dir" backup_metadata.json 2>/dev/null; then
             echo "✅ Metadata file format is valid JSON"
             
             # Test 5: Check if permissions array exists
-            local perm_count=$(jq '.permissions | length' "$temp_dir/backup_metadata.json" 2>/dev/null || echo "0")
+            perm_count=$(jq '.permissions | length' "$temp_dir/backup_metadata.json" 2>/dev/null || echo "0")
             if [[ "$perm_count" -gt 0 ]]; then
                 echo "✅ Backup contains permission information ($perm_count entries)"
             else
@@ -2531,14 +2531,16 @@ EOF
         return 1
     fi
     
-    # Test invalid config file path
+    # Test invalid config file path with actual command (not --help)
+    # Run as vagrant user (non-root) to avoid root check blocking config file validation
     local error_output
-    error_output=$(/home/vagrant/docker-stack-backup/backup-manager.sh --config-file="/nonexistent/path" --help 2>&1 || true)
+    error_output=$(sudo -u vagrant /home/vagrant/docker-stack-backup/backup-manager.sh --config-file="/nonexistent/path" 2>&1 || true)
     
     if echo "$error_output" | grep -q "Configuration file not found"; then
         success "Proper error handling for missing config file"
     else
         error "Missing proper error for non-existent config file"
+        error "DEBUG: Actual output was: '$error_output'"
         rm -f "$test_config"
         return 1
     fi
@@ -2552,12 +2554,13 @@ MISSING_QUOTE=bad syntax here
 EOF
     
     local syntax_error_output
-    syntax_error_output=$(/home/vagrant/docker-stack-backup/backup-manager.sh --config-file="$bad_config" --help 2>&1 || true)
+    syntax_error_output=$(sudo -u vagrant /home/vagrant/docker-stack-backup/backup-manager.sh --config-file="$bad_config" 2>&1 || true)
     
     if echo "$syntax_error_output" | grep -q "syntax errors"; then
         success "Proper error handling for config file syntax errors"
     else
         error "Missing syntax error detection for bad config file"
+        error "DEBUG: Actual syntax error output was: '$syntax_error_output'"
         rm -f "$test_config" "$bad_config"
         return 1
     fi
