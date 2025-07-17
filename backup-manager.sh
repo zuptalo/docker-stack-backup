@@ -3706,21 +3706,47 @@ update_script() {
     
     success "Latest version downloaded"
     
+    # Check if system script exists to determine available options
+    local system_script_exists=false
+    if [[ -f "/opt/backup/backup-manager.sh" ]]; then
+        system_script_exists=true
+    fi
+    
     # Ask user what to update (or auto-select if --yes flag is set)
     local update_choice
     if [[ "${AUTO_YES:-false}" == "true" ]]; then
-        update_choice="3"
-        info "Auto-selecting option 3: Both scripts (recommended)"
+        if [[ "$system_script_exists" == "true" ]]; then
+            update_choice="3"
+            info "Auto-selecting option 3: Both scripts (recommended)"
+        else
+            update_choice="1"
+            info "Auto-selecting option 1: Current script only (system script not installed yet)"
+        fi
     else
         echo
-        echo "Select what to update:"
-        echo "1) Current script only ($(realpath "$0"))"
-        echo "2) System script only (/opt/backup/backup-manager.sh)"
-        echo "3) Both scripts (recommended)"
-        echo "4) Cancel update"
-        echo
-        
-        read -p "Select option [1-4]: " update_choice
+        if [[ "$system_script_exists" == "true" ]]; then
+            echo "Select what to update:"
+            echo "1) Current script only ($(realpath "$0"))"
+            echo "2) System script only (/opt/backup/backup-manager.sh)"
+            echo "3) Both scripts (recommended)"
+            echo "4) Cancel update"
+            echo
+            read -p "Select option [1-4]: " update_choice
+        else
+            echo "System script not found. Only current script can be updated."
+            echo "Run 'setup' first to install the system script for full functionality."
+            echo
+            echo "Available options:"
+            echo "1) Update current script only ($(realpath "$0"))"
+            echo "2) Cancel update"
+            echo
+            read -p "Select option [1-2]: " temp_choice
+            case "$temp_choice" in
+                1) update_choice="1" ;;
+                2) update_choice="4" ;;
+                *) update_choice="4" ;;
+            esac
+        fi
     fi
     
     case "$update_choice" in
