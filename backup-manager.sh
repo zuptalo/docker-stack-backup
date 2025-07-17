@@ -1733,14 +1733,14 @@ configure_nginx_proxy_manager() {
     
     local npm_path="$TOOLS_PATH/nginx-proxy-manager"
     
-    # Use default credentials first (nginx-proxy-manager always starts with these)
-    NPM_ADMIN_EMAIL="admin@example.com"
-    NPM_ADMIN_PASSWORD="changeme"
-    
-    # Try to source custom credentials if they exist, but fall back to defaults
+    # Load custom credentials from setup
     if [[ -f "$npm_path/.credentials" ]]; then
         source "$npm_path/.credentials" || true
     fi
+    
+    # nginx-proxy-manager always starts with default credentials
+    local auth_email="admin@example.com"
+    local auth_password="changeme"
     
     # Wait for API to be available - API endpoint responds even during initialization
     info "Waiting for nginx-proxy-manager API to be ready..."
@@ -1752,7 +1752,7 @@ configure_nginx_proxy_manager() {
         local test_token
         test_token=$(curl -s -X POST "http://localhost:81/api/tokens" \
             -H "Content-Type: application/json" \
-            -d '{"identity": "admin@example.com", "secret": "changeme"}' | \
+            -d "{\"identity\": \"$auth_email\", \"secret\": \"$auth_password\"}" | \
             jq -r '.token // empty' 2>/dev/null)
         
         if [[ -n "$test_token" && "$test_token" != "null" ]]; then
@@ -1776,7 +1776,7 @@ configure_nginx_proxy_manager() {
     local token
     token=$(curl -s -X POST "http://localhost:81/api/tokens" \
         -H "Content-Type: application/json" \
-        -d '{"identity": "admin@example.com", "secret": "changeme"}' | \
+        -d "{\"identity\": \"$auth_email\", \"secret\": \"$auth_password\"}" | \
         jq -r '.token // empty')
     
     if [[ -z "$token" ]]; then
@@ -1789,19 +1789,38 @@ configure_nginx_proxy_manager() {
     
     info "Successfully authenticated with nginx-proxy-manager API"
     
-    # Update admin user password (skip in test environment to avoid conflicts)
+    # Update admin user profile and password (skip in test environment to avoid conflicts)
     if ! is_test_environment; then
         local user_id
         user_id=$(curl -s -H "Authorization: Bearer $token" "http://localhost:81/api/users" | \
             jq -r '.[] | select(.email == "admin@example.com") | .id')
         
         if [[ -n "$user_id" ]]; then
+            # Update user profile (name, nickname, email)
+            info "Updating admin user profile..."
             curl -s -X PUT "http://localhost:81/api/users/$user_id" \
                 -H "Authorization: Bearer $token" \
                 -H "Content-Type: application/json" \
-                -d "{\"email\": \"$NPM_ADMIN_EMAIL\", \"password\": \"$NPM_ADMIN_PASSWORD\"}" >/dev/null
+                -d "{
+                    \"name\": \"Zuptalo\",
+                    \"nickname\": \"Zupi\",
+                    \"email\": \"$NPM_ADMIN_EMAIL\",
+                    \"roles\": [\"admin\"],
+                    \"is_disabled\": false
+                }" >/dev/null
             
-            info "Updated admin credentials"
+            # Update admin password
+            info "Updating admin password..."
+            curl -s -X PUT "http://localhost:81/api/users/$user_id/auth" \
+                -H "Authorization: Bearer $token" \
+                -H "Content-Type: application/json" \
+                -d "{
+                    \"type\": \"password\",
+                    \"current\": \"changeme\",
+                    \"secret\": \"$NPM_ADMIN_PASSWORD\"
+                }" >/dev/null
+            
+            success "Updated admin user profile and password"
         fi
     fi
     
@@ -1814,7 +1833,11 @@ configure_nginx_proxy_manager() {
 create_portainer_proxy_host() {
     local token="$1"
     
-    info "Creating proxy host for $PORTAINER_URL..."
+    # Extract domain name from URL (remove https:// prefix)
+    local portainer_domain
+    portainer_domain=$(echo "$PORTAINER_URL" | sed 's|https\?://||')
+    
+    info "Creating proxy host for $portainer_domain..."
     
     # Create proxy host with minimal required fields
     local proxy_response
@@ -1822,17 +1845,22 @@ create_portainer_proxy_host() {
         -H "Authorization: Bearer $token" \
         -H "Content-Type: application/json" \
         -d "{
-            \"domain_names\": [\"$PORTAINER_URL\"],
+            \"domain_names\": [\"$portainer_domain\"],
             \"forward_scheme\": \"http\",
             \"forward_host\": \"portainer\",
-            \"forward_port\": 9000
+            \"forward_port\": 9000,
+            \"certificate_id\": 0,
+            \"ssl_forced\": false,
+            \"hsts_enabled\": false,
+            \"hsts_subdomains\": false,
+            \"http2_support\": false
         }")
     
     local proxy_id
     proxy_id=$(echo "$proxy_response" | jq -r '.id // empty')
     
     if [[ -n "$proxy_id" ]]; then
-        success "Proxy host created for $PORTAINER_URL (ID: $proxy_id)"
+        success "Proxy host created for $portainer_domain (ID: $proxy_id)"
         
         # Request SSL certificate (skip in test environment or if DNS not configured)
         if is_test_environment; then
@@ -1840,23 +1868,23 @@ create_portainer_proxy_host() {
         elif [[ "${SKIP_SSL_CERTIFICATES:-false}" == "true" ]]; then
             warn "Skipping SSL certificate request - DNS not configured"
         else
-            info "Requesting SSL certificate for $PORTAINER_URL..."
+            info "Requesting SSL certificate for $portainer_domain..."
             curl -s -X POST "http://localhost:81/api/nginx/certificates" \
                 -H "Authorization: Bearer $token" \
                 -H "Content-Type: application/json" \
                 -d "{
                     \"provider\": \"letsencrypt\",
-                    \"domain_names\": [\"$PORTAINER_URL\"],
+                    \"domain_names\": [\"$portainer_domain\"],
                     \"meta\": {
                         \"letsencrypt_email\": \"$NPM_ADMIN_EMAIL\",
                         \"letsencrypt_agree\": true
                     }
                 }" >/dev/null
             
-            success "SSL certificate requested for $PORTAINER_URL"
+            success "SSL certificate requested for $portainer_domain"
         fi
     else
-        error "Failed to create proxy host for $PORTAINER_URL"
+        error "Failed to create proxy host for $portainer_domain"
     fi
 }
 
@@ -1864,25 +1892,35 @@ create_portainer_proxy_host() {
 create_npm_proxy_host() {
     local token="$1"
     
-    info "Creating proxy host for $NPM_URL..."
+    # Extract domain name from URL (remove https:// prefix)
+    local npm_domain
+    npm_domain=$(echo "$NPM_URL" | sed 's|https\?://||')
+    
+    info "Creating proxy host for $npm_domain..."
     
     # Create proxy host for NPM admin interface with minimal required fields
+    # Note: Forward to Docker gateway IP (172.18.0.1) to access host port 81
     local proxy_response
     proxy_response=$(curl -s -X POST "http://localhost:81/api/nginx/proxy-hosts" \
         -H "Authorization: Bearer $token" \
         -H "Content-Type: application/json" \
         -d "{
-            \"domain_names\": [\"$NPM_URL\"],
+            \"domain_names\": [\"$npm_domain\"],
             \"forward_scheme\": \"http\",
-            \"forward_host\": \"localhost\",
-            \"forward_port\": 81
+            \"forward_host\": \"172.18.0.1\",
+            \"forward_port\": 81,
+            \"certificate_id\": 0,
+            \"ssl_forced\": false,
+            \"hsts_enabled\": false,
+            \"hsts_subdomains\": false,
+            \"http2_support\": false
         }")
     
     local proxy_id
     proxy_id=$(echo "$proxy_response" | jq -r '.id // empty')
     
     if [[ -n "$proxy_id" ]]; then
-        success "Proxy host created for $NPM_URL (ID: $proxy_id)"
+        success "Proxy host created for $npm_domain (ID: $proxy_id)"
         
         # Request SSL certificate (skip in test environment or if DNS not configured)
         if is_test_environment; then
@@ -1890,23 +1928,23 @@ create_npm_proxy_host() {
         elif [[ "${SKIP_SSL_CERTIFICATES:-false}" == "true" ]]; then
             warn "Skipping SSL certificate request - DNS not configured"
         else
-            info "Requesting SSL certificate for $NPM_URL..."
+            info "Requesting SSL certificate for $npm_domain..."
             curl -s -X POST "http://localhost:81/api/nginx/certificates" \
                 -H "Authorization: Bearer $token" \
                 -H "Content-Type: application/json" \
                 -d "{
                     \"provider\": \"letsencrypt\",
-                    \"domain_names\": [\"$NPM_URL\"],
+                    \"domain_names\": [\"$npm_domain\"],
                     \"meta\": {
                         \"letsencrypt_email\": \"$NPM_ADMIN_EMAIL\",
                         \"letsencrypt_agree\": true
                     }
                 }" >/dev/null
             
-            success "SSL certificate requested for $NPM_URL"
+            success "SSL certificate requested for $npm_domain"
         fi
     else
-        error "Failed to create proxy host for $NPM_URL"
+        error "Failed to create proxy host for $npm_domain"
     fi
 }
 
@@ -3901,6 +3939,9 @@ main() {
             deploy_portainer
             # NPM must be deployed as a Portainer stack - no fallback
             info "nginx-proxy-manager will be configured after Portainer stack deployment"
+            
+            # Configure nginx-proxy-manager proxy hosts
+            configure_nginx_proxy_manager
             
             # Validate SSH setup for NAS backup functionality
             if validate_ssh_setup; then
