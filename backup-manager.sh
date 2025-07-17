@@ -3737,16 +3737,22 @@ update_script() {
     
     success "Latest version downloaded"
     
-    # Ask user what to update
-    echo
-    echo "Select what to update:"
-    echo "1) Current script only ($(realpath "$0"))"
-    echo "2) System script only (/opt/backup/backup-manager.sh)"
-    echo "3) Both scripts (recommended)"
-    echo "4) Cancel update"
-    echo
-    
-    read -p "Select option [1-4]: " update_choice
+    # Ask user what to update (or auto-select if --yes flag is set)
+    local update_choice
+    if [[ "${AUTO_YES:-false}" == "true" ]]; then
+        update_choice="3"
+        info "Auto-selecting option 3: Both scripts (recommended)"
+    else
+        echo
+        echo "Select what to update:"
+        echo "1) Current script only ($(realpath "$0"))"
+        echo "2) System script only (/opt/backup/backup-manager.sh)"
+        echo "3) Both scripts (recommended)"
+        echo "4) Cancel update"
+        echo
+        
+        read -p "Select option [1-4]: " update_choice
+    fi
     
     case "$update_choice" in
         1)
