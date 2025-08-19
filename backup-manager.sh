@@ -6,7 +6,7 @@ set -euo pipefail
 # Comprehensive script for Docker-based deployment backup and management
 # Compatible with Ubuntu 24.04
 
-VERSION="2025.08.19.2027"
+VERSION="2025.08.19.2036"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_FILE="/var/log/docker-backup-manager.log"
 
