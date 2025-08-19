@@ -1529,8 +1529,8 @@ setup_ssh_keys() {
     info "Setting up SSH keys for $PORTAINER_USER user..."
     
     local ssh_dir="/home/$PORTAINER_USER/.ssh"
-    local ssh_key_path="$ssh_dir/id_rsa"
-    local ssh_pub_path="$ssh_dir/id_rsa.pub"
+    local ssh_key_path="$ssh_dir/id_ed25519"
+    local ssh_pub_path="$ssh_dir/id_ed25519.pub"
     local auth_keys_path="$ssh_dir/authorized_keys"
     
     # Ensure SSH directory exists with proper permissions
@@ -1540,17 +1540,18 @@ setup_ssh_keys() {
         info "Created SSH directory: $ssh_dir"
     fi
     
-    # Generate SSH key pair (always regenerate for clean setup)
-    info "Generating SSH key pair..."
-    sudo -u "$PORTAINER_USER" ssh-keygen -t rsa -b 4096 -f "$ssh_key_path" -N "" -y
-    success "SSH key pair generated"
+    # Generate Ed25519 SSH key pair (modern, secure, and compact)
+    info "Generating Ed25519 SSH key pair..."
+    sudo -u "$PORTAINER_USER" ssh-keygen -t ed25519 -f "$ssh_key_path" -N ""
+    success "Ed25519 SSH key pair generated"
     
     # Set up SSH access for backups
     if ! is_test_environment; then
         # Restricted SSH access for production
+        local public_key_content=$(cat "$ssh_pub_path")
         sudo -u "$PORTAINER_USER" tee "$auth_keys_path" > /dev/null << EOF
 # Restricted key for backup access only
-command="rsync --server --daemon .",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty $(cat $ssh_pub_path | cut -d' ' -f1-2)
+command="rsync --server --daemon .",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty $public_key_content
 EOF
         info "Set up restricted SSH access for production"
     else
@@ -1572,8 +1573,8 @@ EOF
 validate_ssh_setup() {
     info "Validating SSH key setup..."
     
-    local ssh_key_path="/home/$PORTAINER_USER/.ssh/id_rsa"
-    local ssh_pub_path="/home/$PORTAINER_USER/.ssh/id_rsa.pub"
+    local ssh_key_path="/home/$PORTAINER_USER/.ssh/id_ed25519"
+    local ssh_pub_path="/home/$PORTAINER_USER/.ssh/id_ed25519.pub"
     local auth_keys_path="/home/$PORTAINER_USER/.ssh/authorized_keys"
     
     # Check if SSH private key exists and is readable (use sudo since files are owned by portainer)
@@ -3139,7 +3140,7 @@ generate_nas_script() {
     info "Primary server IP: $PRIMARY_SERVER_IP"
     
     # Check if SSH key exists
-    SSH_KEY_PATH="/home/$PORTAINER_USER/.ssh/id_rsa"
+    SSH_KEY_PATH="/home/$PORTAINER_USER/.ssh/id_ed25519"
     if [[ ! -f "$SSH_KEY_PATH" ]]; then
         error "SSH private key not found at: $SSH_KEY_PATH"
         error "Please ensure Docker backup manager setup has been completed"
