@@ -1258,9 +1258,9 @@ check_dns_resolution() {
     
     # Try dig first (more reliable) with timeout
     if command -v dig >/dev/null 2>&1; then
-        # Get the complete DNS resolution chain
+        # Get the complete DNS resolution chain with timeout
         local dig_output
-        dig_output=$(dig +short "$domain" 2>/dev/null || echo "")
+        dig_output=$(timeout "$timeout_seconds" dig +short "$domain" 2>/dev/null || echo "")
         
         if [[ -n "$dig_output" ]]; then
             # dig +short returns the complete chain in order
@@ -1286,9 +1286,9 @@ check_dns_resolution() {
             fi
         fi
     elif command -v nslookup >/dev/null 2>&1; then
-        # Fallback to nslookup (less detailed)
+        # Fallback to nslookup (less detailed) with timeout
         local nslookup_output
-        nslookup_output=$(nslookup "$domain" 2>/dev/null || echo "")
+        nslookup_output=$(timeout "$timeout_seconds" nslookup "$domain" 2>/dev/null || echo "")
         resolved_ip=$(echo "$nslookup_output" | grep -A1 "^Name:" | grep "Address:" | awk '{print $2}' | head -1 | tr -d '\r\n ')
         dns_chain="$resolved_ip (via nslookup)"
     fi
@@ -1305,6 +1305,12 @@ check_dns_resolution() {
     if [[ -n "$resolved_ip" ]] && [[ "$resolved_ip" == "$expected_ip" ]]; then
         return 0
     else
+        # For debugging: check if we got any resolution at all
+        if [[ -z "$resolved_ip" ]]; then
+            DNS_RESOLUTION_CHAIN="No DNS resolution found for $domain"
+        else
+            DNS_RESOLUTION_CHAIN="$dns_chain (resolved to $resolved_ip, expected $expected_ip)"
+        fi
         return 1
     fi
 }
@@ -1357,7 +1363,7 @@ verify_dns_and_ssl() {
     else
         if [[ -n "$DNS_RESOLUTION_CHAIN" ]]; then
             error "❌ $portainer_domain DNS resolution failed"
-            info "   DNS chain: $DNS_RESOLUTION_CHAIN (expected final IP: $public_ip)"
+            info "   Details: $DNS_RESOLUTION_CHAIN"
         else
             error "❌ $portainer_domain does not resolve to any IP address"
         fi
@@ -1373,7 +1379,7 @@ verify_dns_and_ssl() {
     else
         if [[ -n "$DNS_RESOLUTION_CHAIN" ]]; then
             error "❌ $npm_domain DNS resolution failed"
-            info "   DNS chain: $DNS_RESOLUTION_CHAIN (expected final IP: $public_ip)"
+            info "   Details: $DNS_RESOLUTION_CHAIN"
         else
             error "❌ $npm_domain does not resolve to any IP address"
         fi
