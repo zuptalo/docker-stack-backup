@@ -1818,34 +1818,73 @@ configure_nginx_proxy_manager() {
     local auth_email="admin@example.com"
     local auth_password="changeme"
     
-    # Wait for API to be available - API endpoint responds even during initialization
-    info "Waiting for nginx-proxy-manager API to be ready..."
-    local max_attempts=20
+    # Wait for nginx-proxy-manager to complete initialization
+    info "Waiting for nginx-proxy-manager to complete initialization..."
+    local max_attempts=30  # Increased to 5 minutes (30 * 10 seconds)
     local attempt=1
+    local api_ready=false
     
     while [[ $attempt -le $max_attempts ]]; do
-        # Test actual authentication rather than just endpoint availability
-        local test_token
-        test_token=$(curl -s -X POST "http://localhost:81/api/tokens" \
-            -H "Content-Type: application/json" \
-            -d "{\"identity\": \"$auth_email\", \"secret\": \"$auth_password\"}" | \
-            jq -r '.token // empty' 2>/dev/null)
-        
-        if [[ -n "$test_token" && "$test_token" != "null" ]]; then
-            info "nginx-proxy-manager API is ready and authenticated"
-            break
+        # First check if the web interface is responsive
+        if curl -s --connect-timeout 5 "http://localhost:81/" > /dev/null 2>&1; then
+            # Check if API endpoint is available
+            local api_status=$(curl -s -w "%{http_code}" -o /dev/null --connect-timeout 5 "http://localhost:81/api/schema" 2>/dev/null || echo "000")
+            
+            if [[ "$api_status" == "200" ]]; then
+                # Try to authenticate with default credentials
+                local test_token
+                test_token=$(curl -s --connect-timeout 5 -X POST "http://localhost:81/api/tokens" \
+                    -H "Content-Type: application/json" \
+                    -d "{\"identity\": \"$auth_email\", \"secret\": \"$auth_password\"}" 2>/dev/null | \
+                    jq -r '.token // empty' 2>/dev/null)
+                
+                if [[ -n "$test_token" && "$test_token" != "null" ]]; then
+                    info "nginx-proxy-manager API is ready and authenticated"
+                    api_ready=true
+                    break
+                fi
+            fi
         fi
-        info "Waiting for nginx-proxy-manager API... (attempt $attempt/$max_attempts)"
+        
+        # Progress indicator with more detailed status
+        if [[ $((attempt % 6)) -eq 0 ]]; then
+            info "Still waiting for nginx-proxy-manager initialization... (${attempt}0 seconds elapsed)"
+            info "This can take up to 5 minutes on first startup while database and keys are generated"
+        else
+            echo -n "."
+        fi
+        
         sleep 10
         ((attempt++))
     done
     
-    if [[ $attempt -gt $max_attempts ]]; then
-        warn "nginx-proxy-manager API not available after $max_attempts attempts"
-        warn "nginx-proxy-manager deployed but automatic configuration skipped"
-        warn "You can configure it manually at: http://localhost:81"
-        warn "Default credentials: admin@example.com / changeme"
-        return 0
+    if [[ "$api_ready" != "true" ]]; then
+        warn "nginx-proxy-manager API not available after $((max_attempts * 10)) seconds"
+        warn ""
+        warn "Possible solutions:"
+        warn "1. nginx-proxy-manager may need more time to initialize on slower systems"
+        warn "2. Complete the first-run setup manually at: http://localhost:81"
+        warn "3. Check nginx-proxy-manager logs: docker logs nginx-proxy-manager"
+        warn ""
+        warn "Default credentials for manual setup: admin@example.com / changeme"
+        warn ""
+        
+        # Offer to continue with manual setup option
+        if ! is_test_environment; then
+            echo
+            if prompt_yes_no "Would you like to continue setup and configure nginx-proxy-manager manually later?" "y"; then
+                info "Continuing setup - you can configure nginx-proxy-manager manually later"
+                info "Access it at: http://localhost:81 with admin@example.com / changeme"
+                return 0
+            else
+                error "Setup cannot continue without nginx-proxy-manager configuration"
+                return 1
+            fi
+        else
+            # In test environment, continue but don't fail
+            warn "Test environment: continuing without nginx-proxy-manager configuration"
+            return 0
+        fi
     fi
     
     # Login and get token (using default credentials first)
