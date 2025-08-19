@@ -134,12 +134,12 @@ install_dependencies() {
     info "Checking required dependencies..."
     
     # Define required tools with descriptions
-    local required_tools_list="curl wget jq"
+    local required_tools_list="curl wget jq dnsutils"
     
     local missing_tools=()
     local available_tools=()
     
-    # Check which tools are missing
+    # Check which tools are missing (note: dnsutils provides dig command)
     for tool in curl wget jq; do
         if command -v "$tool" >/dev/null 2>&1; then
             available_tools+=("$tool")
@@ -147,6 +147,13 @@ install_dependencies() {
             missing_tools+=("$tool")
         fi
     done
+    
+    # Check for dig (from dnsutils package)
+    if ! command -v dig >/dev/null 2>&1; then
+        missing_tools+=("dnsutils")
+    else
+        available_tools+=("dig")
+    fi
     
     # Show status of all tools
     if [[ ${#available_tools[@]} -gt 0 ]]; then
@@ -162,6 +169,7 @@ install_dependencies() {
                 curl) echo "  • $tool - Download files and make HTTP requests" ;;
                 wget) echo "  • $tool - Download files from web servers" ;;
                 jq) echo "  • $tool - Parse and manipulate JSON data" ;;
+                dnsutils) echo "  • $tool - DNS utilities (dig, nslookup)" ;;
                 *) echo "  • $tool - Required system tool" ;;
             esac
         done
@@ -226,11 +234,21 @@ install_system_packages() {
     # Verify installations
     info "Verifying installations..."
     for package in "${packages[@]}"; do
-        if command -v "$package" >/dev/null 2>&1; then
-            success "$package is now available"
+        # Special handling for dnsutils package (provides dig command)
+        if [[ "$package" == "dnsutils" ]]; then
+            if command -v dig >/dev/null 2>&1; then
+                success "dig (from dnsutils) is now available"
+            else
+                error "dnsutils installation verification failed - dig not found"
+                return 1
+            fi
         else
-            error "$package installation verification failed"
-            return 1
+            if command -v "$package" >/dev/null 2>&1; then
+                success "$package is now available"
+            else
+                error "$package installation verification failed"
+                return 1
+            fi
         fi
     done
     
