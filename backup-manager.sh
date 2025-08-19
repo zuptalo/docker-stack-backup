@@ -1254,26 +1254,55 @@ check_dns_resolution() {
     local timeout_seconds="${3:-10}"  # Default 10 second timeout
     
     local resolved_ip=""
+    local dns_chain=""
     
     # Try dig first (more reliable) with timeout
     if command -v dig >/dev/null 2>&1; then
-        # Use dig to resolve through CNAME records to get final IP
-        resolved_ip=$(timeout "$timeout_seconds" dig +short "$domain" 2>/dev/null | tail -1 || echo "")
+        # Get the complete DNS resolution chain
+        local dig_output
+        dig_output=$(dig +short "$domain" 2>/dev/null || echo "")
         
-        # If the result doesn't look like an IP (e.g., it's a CNAME), resolve it further
-        if [[ -n "$resolved_ip" ]] && [[ ! "$resolved_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            # Result is likely a CNAME, resolve it to IP
-            resolved_ip=$(timeout "$timeout_seconds" dig +short "$resolved_ip" A 2>/dev/null | head -1 || echo "")
+        if [[ -n "$dig_output" ]]; then
+            # dig +short returns the complete chain in order
+            # Last line should be the final IP, earlier lines are CNAMEs
+            local lines=()
+            while IFS= read -r line; do
+                [[ -n "$line" ]] && lines+=("$line")
+            done <<< "$dig_output"
+            
+            if [[ ${#lines[@]} -gt 0 ]]; then
+                # Build the DNS chain representation
+                for line in "${lines[@]}"; do
+                    # Remove trailing dots from CNAMEs
+                    local clean_line="${line%.}"
+                    dns_chain="${dns_chain}${clean_line} -> "
+                done
+                dns_chain="${dns_chain%% -> }"  # Remove trailing arrow
+                
+                # The final resolved IP is the last line (compatible with older bash)
+                resolved_ip="${lines[$(( ${#lines[@]} - 1 ))]}"
+                # Remove trailing dot if present
+                resolved_ip="${resolved_ip%.}"
+            fi
         fi
     elif command -v nslookup >/dev/null 2>&1; then
-        resolved_ip=$(timeout "$timeout_seconds" nslookup "$domain" 2>/dev/null | grep -A1 "^Name:" | grep "Address:" | awk '{print $2}' | head -1 || echo "")
+        # Fallback to nslookup (less detailed)
+        local nslookup_output
+        nslookup_output=$(nslookup "$domain" 2>/dev/null || echo "")
+        resolved_ip=$(echo "$nslookup_output" | grep -A1 "^Name:" | grep "Address:" | awk '{print $2}' | head -1 | tr -d '\r\n ')
+        dns_chain="$resolved_ip (via nslookup)"
     fi
     
-    # Clean up any trailing characters
-    resolved_ip=$(echo "$resolved_ip" | tr -d '\r\n ')
+    # Store DNS chain for debugging (global variable for error reporting)
+    DNS_RESOLUTION_CHAIN="$dns_chain"
+    
+    # Validate final IP format
+    if [[ -n "$resolved_ip" ]] && [[ ! "$resolved_ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+        resolved_ip=""
+    fi
     
     # Check if resolved IP matches expected IP
-    if [[ "$resolved_ip" == "$expected_ip" ]]; then
+    if [[ -n "$resolved_ip" ]] && [[ "$resolved_ip" == "$expected_ip" ]]; then
         return 0
     else
         return 1
@@ -1314,29 +1343,39 @@ verify_dns_and_ssl() {
     
     info "Checking DNS resolution for your domains..."
     
+    # Construct domain names for DNS checking (without https:// prefix)
+    local portainer_domain="$PORTAINER_SUBDOMAIN.$DOMAIN_NAME"
+    local npm_domain="$NPM_SUBDOMAIN.$DOMAIN_NAME"
+    
     # Check Portainer domain
-    if check_dns_resolution "$PORTAINER_URL" "$public_ip"; then
-        success "✅ $PORTAINER_URL resolves to $public_ip"
+    if check_dns_resolution "$portainer_domain" "$public_ip"; then
+        success "✅ $portainer_domain resolves to $public_ip"
+        if [[ -n "$DNS_RESOLUTION_CHAIN" ]]; then
+            info "   DNS chain: $DNS_RESOLUTION_CHAIN"
+        fi
         portainer_dns_ok=true
     else
-        local resolved_ip=$(timeout 10 dig +short "$PORTAINER_URL" A 2>/dev/null | head -1 || echo "")
-        if [[ -n "$resolved_ip" ]]; then
-            error "❌ $PORTAINER_URL resolves to $resolved_ip (expected: $public_ip)"
+        if [[ -n "$DNS_RESOLUTION_CHAIN" ]]; then
+            error "❌ $portainer_domain DNS resolution failed"
+            info "   DNS chain: $DNS_RESOLUTION_CHAIN (expected final IP: $public_ip)"
         else
-            error "❌ $PORTAINER_URL does not resolve to any IP address"
+            error "❌ $portainer_domain does not resolve to any IP address"
         fi
     fi
     
     # Check NPM domain
-    if check_dns_resolution "$NPM_URL" "$public_ip"; then
-        success "✅ $NPM_URL resolves to $public_ip"
+    if check_dns_resolution "$npm_domain" "$public_ip"; then
+        success "✅ $npm_domain resolves to $public_ip"
+        if [[ -n "$DNS_RESOLUTION_CHAIN" ]]; then
+            info "   DNS chain: $DNS_RESOLUTION_CHAIN"
+        fi
         npm_dns_ok=true
     else
-        local resolved_ip=$(timeout 10 dig +short "$NPM_URL" A 2>/dev/null | head -1 || echo "")
-        if [[ -n "$resolved_ip" ]]; then
-            error "❌ $NPM_URL resolves to $resolved_ip (expected: $public_ip)"
+        if [[ -n "$DNS_RESOLUTION_CHAIN" ]]; then
+            error "❌ $npm_domain DNS resolution failed"
+            info "   DNS chain: $DNS_RESOLUTION_CHAIN (expected final IP: $public_ip)"
         else
-            error "❌ $NPM_URL does not resolve to any IP address"
+            error "❌ $npm_domain does not resolve to any IP address"
         fi
     fi
     
