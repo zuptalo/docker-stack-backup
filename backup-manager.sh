@@ -1969,7 +1969,22 @@ create_portainer_proxy_host() {
     
     info "Creating proxy host for $portainer_domain..."
     
-    # Create proxy host with minimal required fields
+    # Determine SSL configuration based on DNS setup
+    local certificate_config="0"
+    local ssl_forced="false"
+    local hsts_enabled="false"
+    local hsts_subdomains="false"
+    local http2_support="false"
+    
+    if ! is_test_environment && [[ "${SKIP_SSL_CERTIFICATES:-false}" != "true" ]]; then
+        certificate_config="\"new\""
+        ssl_forced="true"
+        hsts_enabled="true"
+        hsts_subdomains="true"
+        http2_support="true"
+    fi
+    
+    # Create proxy host with complete configuration including SSL
     local proxy_response
     proxy_response=$(curl -s -X POST "http://localhost:81/api/nginx/proxy-hosts" \
         -H "Authorization: Bearer $token" \
@@ -1979,42 +1994,43 @@ create_portainer_proxy_host() {
             \"forward_scheme\": \"http\",
             \"forward_host\": \"portainer\",
             \"forward_port\": 9000,
-            \"certificate_id\": 0,
-            \"ssl_forced\": false,
-            \"hsts_enabled\": false,
-            \"hsts_subdomains\": false,
-            \"http2_support\": false
+            \"caching_enabled\": true,
+            \"block_exploits\": true,
+            \"allow_websocket_upgrade\": true,
+            \"access_list_id\": \"0\",
+            \"certificate_id\": $certificate_config,
+            \"ssl_forced\": $ssl_forced,
+            \"http2_support\": $http2_support,
+            \"hsts_enabled\": $hsts_enabled,
+            \"hsts_subdomains\": $hsts_subdomains,
+            \"meta\": {
+                \"letsencrypt_email\": \"$NPM_ADMIN_EMAIL\",
+                \"letsencrypt_agree\": true,
+                \"dns_challenge\": false
+            },
+            \"advanced_config\": \"\",
+            \"locations\": []
         }")
     
     local proxy_id
     proxy_id=$(echo "$proxy_response" | jq -r '.id // empty')
     
     if [[ -n "$proxy_id" ]]; then
-        success "Proxy host created for $portainer_domain (ID: $proxy_id)"
-        
-        # Request SSL certificate (skip in test environment or if DNS not configured)
-        if is_test_environment; then
-            warn "Skipping SSL certificate request in test environment"
-        elif [[ "${SKIP_SSL_CERTIFICATES:-false}" == "true" ]]; then
-            warn "Skipping SSL certificate request - DNS not configured"
+        if [[ "$certificate_config" == "\"new\"" ]]; then
+            success "Proxy host created for $portainer_domain (ID: $proxy_id) with SSL certificate"
+            info "HTTPS URL: https://$portainer_domain"
         else
-            info "Requesting SSL certificate for $portainer_domain..."
-            curl -s -X POST "http://localhost:81/api/nginx/certificates" \
-                -H "Authorization: Bearer $token" \
-                -H "Content-Type: application/json" \
-                -d "{
-                    \"provider\": \"letsencrypt\",
-                    \"domain_names\": [\"$portainer_domain\"],
-                    \"meta\": {
-                        \"letsencrypt_email\": \"$NPM_ADMIN_EMAIL\",
-                        \"letsencrypt_agree\": true
-                    }
-                }" >/dev/null
-            
-            success "SSL certificate requested for $portainer_domain"
+            success "Proxy host created for $portainer_domain (ID: $proxy_id) - HTTP only"
+            warn "HTTP URL: http://$portainer_domain"
+            if is_test_environment; then
+                info "SSL skipped in test environment"
+            else
+                info "SSL skipped - configure DNS records and rerun setup for HTTPS"
+            fi
         fi
     else
         error "Failed to create proxy host for $portainer_domain"
+        warn "API Response: $proxy_response"
     fi
 }
 
@@ -2028,8 +2044,23 @@ create_npm_proxy_host() {
     
     info "Creating proxy host for $npm_domain..."
     
-    # Create proxy host for NPM admin interface with minimal required fields
-    # Note: Forward to Docker gateway IP (172.18.0.1) to access host port 81
+    # Determine SSL configuration based on DNS setup
+    local certificate_config="0"
+    local ssl_forced="false"
+    local hsts_enabled="false"
+    local hsts_subdomains="false"
+    local http2_support="false"
+    
+    if ! is_test_environment && [[ "${SKIP_SSL_CERTIFICATES:-false}" != "true" ]]; then
+        certificate_config="\"new\""
+        ssl_forced="true"
+        hsts_enabled="true"
+        hsts_subdomains="true"
+        http2_support="true"
+    fi
+    
+    # Create proxy host for NPM admin interface with complete configuration
+    # Forward to nginx-proxy-manager container instead of Docker gateway IP
     local proxy_response
     proxy_response=$(curl -s -X POST "http://localhost:81/api/nginx/proxy-hosts" \
         -H "Authorization: Bearer $token" \
@@ -2037,44 +2068,45 @@ create_npm_proxy_host() {
         -d "{
             \"domain_names\": [\"$npm_domain\"],
             \"forward_scheme\": \"http\",
-            \"forward_host\": \"172.18.0.1\",
+            \"forward_host\": \"nginx-proxy-manager\",
             \"forward_port\": 81,
-            \"certificate_id\": 0,
-            \"ssl_forced\": false,
-            \"hsts_enabled\": false,
-            \"hsts_subdomains\": false,
-            \"http2_support\": false
+            \"caching_enabled\": true,
+            \"block_exploits\": true,
+            \"allow_websocket_upgrade\": true,
+            \"access_list_id\": \"0\",
+            \"certificate_id\": $certificate_config,
+            \"ssl_forced\": $ssl_forced,
+            \"http2_support\": $http2_support,
+            \"hsts_enabled\": $hsts_enabled,
+            \"hsts_subdomains\": $hsts_subdomains,
+            \"meta\": {
+                \"letsencrypt_email\": \"$NPM_ADMIN_EMAIL\",
+                \"letsencrypt_agree\": true,
+                \"dns_challenge\": false
+            },
+            \"advanced_config\": \"\",
+            \"locations\": []
         }")
     
     local proxy_id
     proxy_id=$(echo "$proxy_response" | jq -r '.id // empty')
     
     if [[ -n "$proxy_id" ]]; then
-        success "Proxy host created for $npm_domain (ID: $proxy_id)"
-        
-        # Request SSL certificate (skip in test environment or if DNS not configured)
-        if is_test_environment; then
-            warn "Skipping SSL certificate request in test environment"
-        elif [[ "${SKIP_SSL_CERTIFICATES:-false}" == "true" ]]; then
-            warn "Skipping SSL certificate request - DNS not configured"
+        if [[ "$certificate_config" == "\"new\"" ]]; then
+            success "Proxy host created for $npm_domain (ID: $proxy_id) with SSL certificate"
+            info "HTTPS URL: https://$npm_domain"
         else
-            info "Requesting SSL certificate for $npm_domain..."
-            curl -s -X POST "http://localhost:81/api/nginx/certificates" \
-                -H "Authorization: Bearer $token" \
-                -H "Content-Type: application/json" \
-                -d "{
-                    \"provider\": \"letsencrypt\",
-                    \"domain_names\": [\"$npm_domain\"],
-                    \"meta\": {
-                        \"letsencrypt_email\": \"$NPM_ADMIN_EMAIL\",
-                        \"letsencrypt_agree\": true
-                    }
-                }" >/dev/null
-            
-            success "SSL certificate requested for $npm_domain"
+            success "Proxy host created for $npm_domain (ID: $proxy_id) - HTTP only"
+            warn "HTTP URL: http://$npm_domain"
+            if is_test_environment; then
+                info "SSL skipped in test environment"
+            else
+                info "SSL skipped - configure DNS records and rerun setup for HTTPS"
+            fi
         fi
     else
         error "Failed to create proxy host for $npm_domain"
+        warn "API Response: $proxy_response"
     fi
 }
 
