@@ -3743,7 +3743,7 @@ backup_current_version() {
 download_latest_version() {
     local temp_file="/tmp/backup-manager-latest.sh"
     
-    info "Downloading latest version..."
+    info "Downloading latest version..." >&2
     
     # Try to download from GitHub
     if command -v curl >/dev/null 2>&1; then
