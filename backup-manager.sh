@@ -4289,7 +4289,7 @@ main() {
             
             # Show Portainer URL
             if ! is_test_environment && [[ "${SKIP_SSL_CERTIFICATES:-false}" != "true" ]]; then
-                printf "  • Portainer:              %b\n" "${GREEN}https://$PORTAINER_URL${NC}"
+                printf "  • Portainer:              %b\n" "${GREEN}$PORTAINER_URL${NC}"
             else
                 if is_test_environment; then
                     printf "  • Portainer:              %b\n" "${GREEN}http://localhost:9000${NC} (test environment)"
