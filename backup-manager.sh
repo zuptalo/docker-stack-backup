@@ -1758,7 +1758,7 @@ prepare_nginx_proxy_manager_files() {
     
     local npm_path="$TOOLS_PATH/nginx-proxy-manager"
     
-    # Create docker-compose.yml for nginx-proxy-manager
+    # Create docker-compose.yml for nginx-proxy-manager with absolute paths
     sudo -u "$PORTAINER_USER" tee "$npm_path/docker-compose.yml" > /dev/null << EOF
 services:
   nginx-proxy-manager:
@@ -1770,8 +1770,8 @@ services:
       - '443:443'
       - '81:81'
     volumes:
-      - ./data:/data
-      - ./letsencrypt:/etc/letsencrypt
+      - $npm_path/data:/data
+      - $npm_path/letsencrypt:/etc/letsencrypt
     networks:
       - prod-network
     environment:
@@ -1792,9 +1792,14 @@ NPM_ADMIN_PASSWORD=${npm_admin_password}
 NPM_API_URL=http://localhost:81/api
 EOF
 
+    # Create data directories with proper ownership
+    sudo -u "$PORTAINER_USER" mkdir -p "$npm_path/data" "$npm_path/letsencrypt"
+    sudo chmod 755 "$npm_path/data" "$npm_path/letsencrypt"
+    
     success "nginx-proxy-manager files prepared"
     info "Compose file: $npm_path/docker-compose.yml"
     info "Credentials file: $npm_path/.credentials"
+    info "Data directories: $npm_path/data, $npm_path/letsencrypt"
     info "Will be deployed as a Portainer stack"
 }
 
