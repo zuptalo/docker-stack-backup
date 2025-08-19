@@ -4115,7 +4115,17 @@ main() {
             
             success "Setup completed successfully!"
             success "Portainer available at: $PORTAINER_URL"
-            success "nginx-proxy-manager admin panel: http://localhost:81"
+            
+            # Show appropriate NPM URL based on SSL configuration
+            if ! is_test_environment && [[ "${SKIP_SSL_CERTIFICATES:-false}" != "true" ]]; then
+                success "nginx-proxy-manager admin panel: https://$NPM_URL"
+            else
+                if is_test_environment; then
+                    success "nginx-proxy-manager admin panel: http://localhost:81 (test environment)"
+                else
+                    success "nginx-proxy-manager admin panel: http://$NPM_URL (configure DNS for HTTPS)"
+                fi
+            fi
             ;;
         backup)
             install_dependencies
