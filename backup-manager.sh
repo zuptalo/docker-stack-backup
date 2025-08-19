@@ -3966,12 +3966,148 @@ update_script() {
     return 0
 }
 
+# Uninstall system - complete cleanup with double confirmation
+uninstall_system() {
+    printf "%b\n" "${RED}⚠️  DESTRUCTIVE OPERATION WARNING${NC}"
+    echo "════════════════════════════════════════════════════════════════"
+    echo
+    printf "%b\n" "${YELLOW}This command will completely remove:${NC}"
+    echo "  • All Docker containers (Portainer, nginx-proxy-manager, user stacks)"
+    echo "  • All Docker images, volumes, and networks"
+    echo "  • All configuration files in /opt/portainer and /opt/tools"
+    echo "  • All backup data in /opt/backup (unless you choose to keep it)"
+    echo "  • Docker system will be completely cleaned"
+    echo
+    printf "%b\n" "${RED}⚠️  This action CANNOT be undone!${NC}"
+    echo
+    
+    # First confirmation
+    if ! prompt_yes_no "Are you absolutely sure you want to completely uninstall the system?" "n"; then
+        info "Uninstall cancelled by user"
+        return 0
+    fi
+    
+    echo
+    printf "%b\n" "${RED}⚠️  FINAL WARNING: This will destroy ALL data!${NC}"
+    printf "%b\n" "${YELLOW}Type 'YES I UNDERSTAND' to proceed (case sensitive):${NC}"
+    
+    local confirmation
+    if [[ "${NON_INTERACTIVE:-false}" == "true" ]] || [[ "${AUTO_YES:-false}" == "true" ]]; then
+        confirmation="YES I UNDERSTAND"
+        info "Non-interactive mode: proceeding with uninstall"
+    else
+        read -r confirmation
+    fi
+    
+    if [[ "$confirmation" != "YES I UNDERSTAND" ]]; then
+        info "Uninstall cancelled - confirmation phrase not matched"
+        return 0
+    fi
+    
+    echo
+    warn "Starting complete system uninstall in 5 seconds..."
+    if ! is_test_environment; then
+        sleep 5
+    fi
+    
+    info "Beginning system uninstall..."
+    echo
+    
+    # Step 1: Stop and remove all containers
+    info "Step 1/6: Stopping all Docker containers..."
+    if docker ps -q | xargs -r docker stop; then
+        success "All containers stopped"
+    else
+        warn "Some containers may have already been stopped"
+    fi
+    
+    info "Removing all Docker containers..."
+    if docker ps -aq | xargs -r docker rm -f; then
+        success "All containers removed"
+    else
+        warn "No containers to remove or some removal failed"
+    fi
+    
+    # Step 2: Remove Docker networks (except defaults)
+    info "Step 2/6: Cleaning up Docker networks..."
+    # Remove prod-network specifically
+    if docker network inspect prod-network >/dev/null 2>&1; then
+        docker network rm prod-network && success "Removed prod-network"
+    fi
+    # Remove other custom networks
+    docker network ls --filter type=custom -q | xargs -r docker network rm && success "Custom networks cleaned"
+    
+    # Step 3: Remove Docker images, volumes, and system cleanup
+    info "Step 3/6: Performing complete Docker system cleanup..."
+    docker system prune -af --volumes && success "Docker system completely cleaned"
+    
+    # Step 4: Remove configuration directories
+    info "Step 4/6: Removing configuration directories..."
+    
+    if [[ -d "/opt/portainer" ]]; then
+        sudo rm -rf /opt/portainer && success "Removed /opt/portainer"
+    else
+        info "/opt/portainer directory not found"
+    fi
+    
+    if [[ -d "/opt/tools" ]]; then
+        sudo rm -rf /opt/tools && success "Removed /opt/tools"
+    else
+        info "/opt/tools directory not found"
+    fi
+    
+    # Step 5: Handle backup directory (optional)
+    info "Step 5/6: Handling backup data..."
+    if [[ -d "/opt/backup" ]]; then
+        if prompt_yes_no "Do you want to keep backup data in /opt/backup?" "y"; then
+            info "Backup data preserved in /opt/backup"
+        else
+            sudo rm -rf /opt/backup && success "Removed /opt/backup"
+        fi
+    else
+        info "/opt/backup directory not found"
+    fi
+    
+    # Step 6: Remove configuration files
+    info "Step 6/6: Removing configuration files..."
+    if [[ -f "/etc/docker-backup-manager.conf" ]]; then
+        sudo rm -f /etc/docker-backup-manager.conf && success "Removed /etc/docker-backup-manager.conf"
+    else
+        info "Configuration file not found"
+    fi
+    
+    # Remove cron jobs
+    if command -v crontab >/dev/null 2>&1; then
+        if sudo -u portainer crontab -l 2>/dev/null | grep -q "docker-backup-manager"; then
+            sudo -u portainer crontab -r 2>/dev/null && success "Removed portainer user cron jobs"
+        fi
+        if crontab -l 2>/dev/null | grep -q "docker-backup-manager"; then
+            warn "Found backup-manager cron jobs for current user - you may want to remove them manually"
+        fi
+    fi
+    
+    echo
+    printf "%b\n" "${GREEN}✅ System uninstall completed successfully!${NC}"
+    echo "════════════════════════════════════════════════════════════════"
+    echo
+    printf "%b\n" "${BLUE}💡 Next steps:${NC}"
+    echo "  • Docker is still installed and ready for fresh setup"
+    echo "  • Run './backup-manager.sh setup' to reinstall the system"
+    echo "  • The 'portainer' system user is still available for reuse"
+    echo
+    if [[ -d "/opt/backup" ]]; then
+        info "Backup data was preserved and will be available after reinstall"
+    fi
+    
+    success "System is ready for fresh installation"
+}
+
 # Show usage information
 usage() {
     printf "%b" "$(cat << EOF
 Docker Backup Manager v${VERSION}
 
-Usage: $0 [FLAGS] {setup|config|backup|restore|schedule|generate-nas-script|update}
+Usage: $0 [FLAGS] {setup|config|backup|restore|schedule|generate-nas-script|update|uninstall}
 
 ${BLUE}═══ FLAGS ═══${NC}
     ${BLUE}--yes, -y${NC}               # Auto-answer 'yes' to all prompts
@@ -3991,6 +4127,7 @@ ${BLUE}═══ WORKFLOW COMMANDS (in recommended order) ═══${NC}
     ${BLUE}generate-nas-script${NC} - 📡 Generate self-contained NAS backup script
     
     ${BLUE}update${NC}              - 🔄 Update script to latest version from GitHub
+    ${BLUE}uninstall${NC}           - 🗑️  Complete system cleanup (destructive operation)
 
 ${BLUE}═══ GETTING STARTED ═══${NC}
     ${BLUE}$0 setup${NC}               # 🚀 First-time setup (run this first!)
@@ -4200,6 +4337,10 @@ main() {
         update)
             install_dependencies
             update_script
+            ;;
+        uninstall)
+            install_dependencies
+            uninstall_system
             ;;
         help|--help|-h)
             usage
