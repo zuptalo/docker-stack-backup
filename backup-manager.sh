@@ -3768,9 +3768,41 @@ update_script_file() {
     local target_file="$2"
     local script_type="$3"
     
-    # Verify downloaded file is valid
-    if ! bash -n "$source_file" 2>/dev/null; then
-        error "Downloaded $script_type script has syntax errors"
+    # Check if source file exists and is readable
+    if [[ ! -f "$source_file" ]]; then
+        error "Source file $source_file not found"
+        return 1
+    fi
+    
+    if [[ ! -r "$source_file" ]]; then
+        error "Cannot read source file $source_file"
+        return 1
+    fi
+    
+    # Check file size (should not be empty or too small)
+    local file_size
+    file_size=$(stat -c%s "$source_file" 2>/dev/null || stat -f%z "$source_file" 2>/dev/null || echo "0")
+    if [[ "$file_size" -lt 1000 ]]; then
+        error "Downloaded file is too small ($file_size bytes) - likely incomplete"
+        if [[ "$file_size" -gt 0 ]]; then
+            warn "File content preview:"
+            head -10 "$source_file" || true
+        fi
+        return 1
+    fi
+    
+    # Verify downloaded file is valid bash syntax
+    local syntax_check_output
+    syntax_check_output=$(bash -n "$source_file" 2>&1)
+    if [[ $? -ne 0 ]]; then
+        error "Downloaded $script_type script has syntax errors:"
+        error "$syntax_check_output"
+        if [[ -f "$source_file" ]]; then
+            warn "File preview (first 20 lines):"
+            head -20 "$source_file" || true
+            warn "File preview (last 10 lines):"
+            tail -10 "$source_file" || true
+        fi
         return 1
     fi
     
