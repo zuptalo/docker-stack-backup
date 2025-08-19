@@ -2200,7 +2200,6 @@ initialize_portainer_admin() {
     # Check if initialization was successful
     if echo "$init_response" | jq -e '.Id' >/dev/null 2>&1; then
         success "Portainer admin user initialized"
-        info "Admin credentials: $PORTAINER_ADMIN_USERNAME / $PORTAINER_ADMIN_PASSWORD"
         
         # Create local Docker endpoint immediately
         if ! create_local_docker_endpoint; then
@@ -2215,7 +2214,6 @@ initialize_portainer_admin() {
         }
     else
         warn "Portainer admin initialization may have failed or was already done"
-        info "Admin credentials: $PORTAINER_ADMIN_USERNAME / $PORTAINER_ADMIN_PASSWORD"
     fi
 }
 
@@ -4114,18 +4112,46 @@ main() {
             fi
             
             success "Setup completed successfully!"
-            success "Portainer available at: $PORTAINER_URL"
+            echo
+            printf "%b\n" "${BLUE}🎉 Docker Stack Backup Manager is Ready!${NC}"
+            echo "═══════════════════════════════════════════════════════════════"
+            echo
+            printf "%b\n" "${BLUE}📱 Service Access URLs:${NC}"
             
-            # Show appropriate NPM URL based on SSL configuration
+            # Show Portainer URL
             if ! is_test_environment && [[ "${SKIP_SSL_CERTIFICATES:-false}" != "true" ]]; then
-                success "nginx-proxy-manager admin panel: https://$NPM_URL"
+                printf "  • Portainer:              %b\n" "${GREEN}https://$PORTAINER_URL${NC}"
             else
                 if is_test_environment; then
-                    success "nginx-proxy-manager admin panel: http://localhost:81 (test environment)"
+                    printf "  • Portainer:              %b\n" "${GREEN}http://localhost:9000${NC} (test environment)"
                 else
-                    success "nginx-proxy-manager admin panel: http://$NPM_URL (configure DNS for HTTPS)"
+                    printf "  • Portainer:              %b\n" "${YELLOW}http://$PORTAINER_URL${NC} (configure DNS for HTTPS)"
                 fi
             fi
+            
+            # Show nginx-proxy-manager URL
+            if ! is_test_environment && [[ "${SKIP_SSL_CERTIFICATES:-false}" != "true" ]]; then
+                printf "  • nginx-proxy-manager:    %b\n" "${GREEN}https://$NPM_URL${NC}"
+            else
+                if is_test_environment; then
+                    printf "  • nginx-proxy-manager:    %b\n" "${GREEN}http://localhost:81${NC} (test environment)"
+                else
+                    printf "  • nginx-proxy-manager:    %b\n" "${YELLOW}http://$NPM_URL${NC} (configure DNS for HTTPS)"
+                fi
+            fi
+            
+            echo
+            printf "%b\n" "${BLUE}🔑 Login Credentials (for both services):${NC}"
+            printf "  • Username: %b\n" "${GREEN}admin@${DOMAIN_NAME}${NC}"
+            printf "  • Password: %b\n" "${GREEN}AdminPassword123!${NC}"
+            echo
+            printf "%b\n" "${BLUE}💡 Next Steps:${NC}"
+            echo "  1. Access Portainer to manage your Docker stacks"
+            echo "  2. Use nginx-proxy-manager to configure additional proxy hosts"
+            echo "  3. Run './backup-manager.sh backup' to create your first backup"
+            echo "  4. Set up automated backups with './backup-manager.sh schedule'"
+            echo
+            success "Your Docker environment is ready for production use!"
             ;;
         backup)
             install_dependencies
