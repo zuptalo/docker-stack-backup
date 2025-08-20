@@ -4392,10 +4392,580 @@ EOF
 }
 
 
+# Command-specific help function
+show_command_help() {
+    local command="$1"
+    
+    case "$command" in
+        setup)
+            printf "%b" "$(cat << EOF
+Docker Backup Manager v${VERSION} - Setup Command Help
+
+${BLUE}COMMAND:${NC} setup
+${BLUE}PURPOSE:${NC} Complete initial setup of Docker Stack Backup Manager
+
+${BLUE}DESCRIPTION:${NC}
+This command performs a complete setup of your Docker environment with:
+- Docker and Docker Compose installation
+- Portainer container management platform deployment
+- nginx-proxy-manager reverse proxy with SSL automation
+- System user creation with SSH key management
+- Network and directory structure setup
+
+${BLUE}USAGE:${NC}
+    $0 [FLAGS] setup
+    
+${BLUE}EXAMPLES:${NC}
+    $0 setup                           # Interactive setup
+    $0 --yes setup                     # Auto-confirm all prompts
+    $0 --config-file=/path/config setup   # Use configuration file
+    $0 --non-interactive --yes setup  # Fully automated setup
+
+${BLUE}REQUIREMENTS:${NC}
+    • Ubuntu 24.04 LTS (recommended) or compatible Linux distribution
+    • User with sudo privileges
+    • Internet connection for package downloads
+    • Domain name pointing to server IP (for SSL certificates)
+    
+${BLUE}TROUBLESHOOTING:${NC}
+    ${YELLOW}❌ "Docker installation failed"${NC}
+        → Check internet connection
+        → Verify Ubuntu version compatibility: lsb_release -a
+        → Try: sudo apt update && sudo apt upgrade
+        
+    ${YELLOW}❌ "SSL certificate creation failed"${NC}
+        → Verify domain DNS points to server IP: dig yourdomain.com
+        → Check ports 80, 443 are accessible
+        → Use --skip-ssl for HTTP-only setup during testing
+        
+    ${YELLOW}❌ "Portainer deployment failed"${NC}
+        → Check Docker daemon: sudo systemctl status docker
+        → Verify available disk space: df -h
+        → Check for port conflicts: sudo netstat -tulpn | grep :9000
+
+${YELLOW}💡 TIP: Setup creates configuration file at /etc/docker-backup-manager.conf${NC}
+
+EOF
+)"
+            ;;
+        backup)
+            printf "%b" "$(cat << EOF
+Docker Backup Manager v${VERSION} - Backup Command Help
+
+${BLUE}COMMAND:${NC} backup
+${BLUE}PURPOSE:${NC} Create comprehensive backup of Docker environment
+
+${BLUE}DESCRIPTION:${NC}
+Creates a complete backup including:
+- All container data and volumes
+- Portainer stack configurations with environment variables
+- nginx-proxy-manager settings and SSL certificates
+- File permissions and ownership preservation
+- System metadata for reliable restoration
+
+${BLUE}USAGE:${NC}
+    $0 [FLAGS] backup
+    
+${BLUE}EXAMPLES:${NC}
+    $0 backup                     # Interactive backup with prompts
+    $0 --quiet backup             # Minimal output
+    $0 --yes backup               # Auto-confirm backup creation
+
+${BLUE}BACKUP PROCESS:${NC}
+    1. Capture running stack states via Portainer API
+    2. Gracefully stop containers (except Portainer)
+    3. Create compressed archive with preserved permissions
+    4. Restart services in proper order
+    5. Clean up old backups per retention policy
+    
+${BLUE}BACKUP LOCATION:${NC}
+    • Default: /opt/backup/
+    • Format: docker_backup_YYYYMMDD_HHMMSS.tar.gz
+    • Retention: 7 days (configurable)
+    
+${BLUE}TROUBLESHOOTING:${NC}
+    ${YELLOW}❌ "Insufficient disk space"${NC}
+        → Check available space: df -h /opt/backup
+        → Clean old backups manually or adjust retention
+        → Consider external backup location
+        
+    ${YELLOW}❌ "Portainer API authentication failed"${NC}
+        → Verify Portainer is running: docker ps | grep portainer
+        → Check credentials file: /opt/portainer/.credentials
+        → Try: $0 config (to reconfigure)
+        
+    ${YELLOW}❌ "Container stop timeout"${NC}
+        → Some containers may be unresponsive
+        → Check docker logs for specific containers
+        → Backup will continue but may have inconsistent data
+
+${YELLOW}💡 TIP: Backups are created with enhanced metadata for reliable restoration${NC}
+
+EOF
+)"
+            ;;
+        restore)
+            printf "%b" "$(cat << EOF
+Docker Backup Manager v${VERSION} - Restore Command Help
+
+${BLUE}COMMAND:${NC} restore
+${BLUE}PURPOSE:${NC} Restore Docker environment from backup
+
+${BLUE}DESCRIPTION:${NC}
+Interactively restore your Docker environment from available backups:
+- Select from available backup archives
+- Restore all container data and configurations
+- Recreate Portainer stacks with original settings
+- Preserve file permissions and ownership
+- Restart services in proper dependency order
+
+${BLUE}USAGE:${NC}
+    $0 [FLAGS] restore
+    
+${BLUE}EXAMPLES:${NC}
+    $0 restore                    # Interactive restore with backup selection
+    $0 --yes restore              # Auto-confirm restore prompts
+
+${BLUE}RESTORE PROCESS:${NC}
+    1. Display available backups for selection
+    2. Create safety backup of current state
+    3. Gracefully stop all containers
+    4. Extract backup data with preserved permissions
+    5. Restart services and restore stack states
+    6. Validate service accessibility
+    
+${BLUE}BACKUP SELECTION:${NC}
+    • Lists all available backup files with timestamps
+    • Shows backup size and creation date
+    • Allows selection by number or filename
+    • Displays architecture compatibility warnings
+    
+${BLUE}TROUBLESHOOTING:${NC}
+    ${YELLOW}❌ "No backups found"${NC}
+        → Check backup directory: ls -la /opt/backup/
+        → Verify backup path in config: $0 config
+        → Create backup first: $0 backup
+        
+    ${YELLOW}❌ "Permission denied during restore"${NC}
+        → Ensure running with proper user privileges
+        → Check backup directory permissions
+        → Try: sudo $0 restore (if needed)
+        
+    ${YELLOW}❌ "Services failed to start after restore"${NC}
+        → Check Docker daemon: sudo systemctl status docker
+        → Verify container logs: docker logs <container-name>
+        → Try manual restart: $0 config
+        
+    ${YELLOW}❌ "Architecture mismatch warning"${NC}
+        → Backup was created on different CPU architecture
+        → Docker images may need to be rebuilt
+        → Some containers may fail to start
+
+${YELLOW}💡 TIP: Restore automatically creates safety backup before proceeding${NC}
+
+EOF
+)"
+            ;;
+        schedule)
+            printf "%b" "$(cat << EOF
+Docker Backup Manager v${VERSION} - Schedule Command Help
+
+${BLUE}COMMAND:${NC} schedule
+${BLUE}PURPOSE:${NC} Setup automated backup scheduling using cron
+
+${BLUE}DESCRIPTION:${NC}
+Configures automated backups to run at specified intervals:
+- Multiple predefined schedules (daily, weekly, etc.)
+- Custom cron expression support
+- Automatic cleanup of old backups
+- Email notifications (if configured)
+- Logging of all backup operations
+
+${BLUE}USAGE:${NC}
+    $0 [FLAGS] schedule
+    
+${BLUE}EXAMPLES:${NC}
+    $0 schedule                   # Interactive schedule setup
+    $0 --yes schedule             # Use default daily backup schedule
+
+${BLUE}SCHEDULE OPTIONS:${NC}
+    1. Daily at 2:00 AM
+    2. Weekly on Sundays at 3:00 AM  
+    3. Twice daily (6:00 AM, 6:00 PM)
+    4. Every 6 hours
+    5. Custom cron expression
+    
+${BLUE}CUSTOM CRON EXAMPLES:${NC}
+    • 0 2 * * *        → Daily at 2:00 AM
+    • 0 3 * * 0        → Weekly on Sunday at 3:00 AM
+    • 0 */6 * * *      → Every 6 hours
+    • 30 1 */3 * *     → Every 3 days at 1:30 AM
+    • 0 9-17 * * 1-5   → Hourly during business hours (9-5, Mon-Fri)
+    
+${BLUE}BACKUP RETENTION:${NC}
+    • Local backups: 7 days (default, configurable)
+    • Automatic cleanup of expired backups
+    • Size-based retention options
+    
+${BLUE}TROUBLESHOOTING:${NC}
+    ${YELLOW}❌ "crontab: command not found"${NC}
+        → Install cron package: sudo apt install cron
+        → Start cron service: sudo systemctl enable --now cron
+        → Verify: sudo systemctl status cron
+        
+    ${YELLOW}❌ "Permission denied for cron"${NC}
+        → Check user permissions: ls -la /etc/cron.allow
+        → Verify cron access: crontab -l
+        → May need to run as portainer user
+        
+    ${YELLOW}❌ "Scheduled backups not running"${NC}
+        → Check cron logs: sudo tail -f /var/log/cron
+        → Verify cron entry: sudo -u portainer crontab -l
+        → Test backup manually: $0 backup
+        
+    ${YELLOW}❌ "Invalid cron expression"${NC}
+        → Use standard cron format: minute hour day month weekday
+        → Test expression: https://crontab.guru/
+        → Each field: * = any, number = specific, */n = every n
+
+${YELLOW}💡 TIP: Scheduled backups run as portainer user and log to /var/log/docker-backup-manager.log${NC}
+
+EOF
+)"
+            ;;
+        config)
+            printf "%b" "$(cat << EOF
+Docker Backup Manager v${VERSION} - Config Command Help
+
+${BLUE}COMMAND:${NC} config
+${BLUE}PURPOSE:${NC} Interactive configuration management
+
+${BLUE}DESCRIPTION:${NC}
+Manage Docker Backup Manager configuration:
+- Modify domain and subdomain settings
+- Change backup paths and retention policies
+- Update service configurations
+- Repair SSH keys for NAS backup functionality
+- Migrate data to new paths
+
+${BLUE}USAGE:${NC}
+    $0 [FLAGS] config
+    
+${BLUE}EXAMPLES:${NC}
+    $0 config                     # Interactive configuration
+    $0 --config-file=/path config # Load from specific config file
+
+${BLUE}CONFIGURATION OPTIONS:${NC}
+    • Domain and subdomain settings
+    • Directory paths (Portainer, tools, backups)
+    • Backup retention policies
+    • SSL certificate preferences
+    • NAS backup settings
+    
+${BLUE}PATH MIGRATION:${NC}
+    If changing paths with existing stacks:
+    1. Automatically detects existing stacks
+    2. Creates pre-migration backup
+    3. Stops services gracefully
+    4. Moves data to new locations
+    5. Updates configurations
+    6. Validates service restart
+    
+${BLUE}SSH KEY MANAGEMENT:${NC}
+    • Automatically validates SSH setup
+    • Repairs keys if validation fails
+    • Required for NAS backup functionality
+    • Uses Ed25519 keys for security
+    
+${BLUE}TROUBLESHOOTING:${NC}
+    ${YELLOW}❌ "Configuration file not found"${NC}
+        → Run setup first: $0 setup
+        → Check file exists: ls -la /etc/docker-backup-manager.conf
+        → Create manually or re-run setup
+        
+    ${YELLOW}❌ "Path migration failed"${NC}
+        → Ensure sufficient disk space on destination
+        → Check directory permissions
+        → Review backup created before migration
+        → Rollback if necessary: $0 restore
+        
+    ${YELLOW}❌ "SSH key validation failed"${NC}
+        → Allow repair when prompted
+        → Check SSH directory permissions: ls -la ~/.ssh/
+        → Verify key files: ls -la /home/portainer/.ssh/
+        
+    ${YELLOW}❌ "Service restart failed after config"${NC}
+        → Check Docker daemon: sudo systemctl status docker
+        → Verify new paths are accessible
+        → Review container logs: docker logs <container>
+        → Consider rollback: $0 restore
+
+${YELLOW}💡 TIP: Config changes are backed up automatically before applying${NC}
+
+EOF
+)"
+            ;;
+        generate-nas-script)
+            printf "%b" "$(cat << EOF
+Docker Backup Manager v${VERSION} - Generate NAS Script Help
+
+${BLUE}COMMAND:${NC} generate-nas-script
+${BLUE}PURPOSE:${NC} Generate self-contained NAS backup client script
+
+${BLUE}DESCRIPTION:${NC}
+Creates a standalone script for NAS or remote servers:
+- Self-contained with embedded SSH keys
+- No setup required on remote machine
+- Configurable backup paths and retention
+- Automatic synchronization with primary server
+- Built-in testing and validation
+
+${BLUE}USAGE:${NC}
+    $0 [FLAGS] generate-nas-script
+    
+${BLUE}EXAMPLES:${NC}
+    $0 generate-nas-script        # Interactive NAS script generation
+    $0 --yes generate-nas-script  # Auto-confirm generation
+
+${BLUE}GENERATED SCRIPT FEATURES:${NC}
+    • nas-backup-client.sh - Complete standalone script
+    • Embedded SSH private key (no separate key files)
+    • Configurable LOCAL_BACKUP_PATH in script header
+    • Built-in commands: test, list, sync, stats
+    • Retention management for local and remote backups
+    
+${BLUE}NAS SCRIPT COMMANDS:${NC}
+    ./nas-backup-client.sh test   # Test SSH connection
+    ./nas-backup-client.sh list   # List available backups
+    ./nas-backup-client.sh sync   # Sync backups from primary
+    ./nas-backup-client.sh stats  # Show backup statistics
+    
+${BLUE}DEPLOYMENT:${NC}
+    1. Copy generated script to your NAS/remote server
+    2. Edit LOCAL_BACKUP_PATH in script header if needed
+    3. Make executable: chmod +x nas-backup-client.sh
+    4. Test connection: ./nas-backup-client.sh test
+    5. Schedule with cron: ./nas-backup-client.sh sync
+    
+${BLUE}TROUBLESHOOTING:${NC}
+    ${YELLOW}❌ "SSH key generation failed"${NC}
+        → Check SSH directory: ls -la /home/portainer/.ssh/
+        → Repair SSH setup: $0 config
+        → Verify portainer user exists
+        
+    ${YELLOW}❌ "Cannot connect to primary server"${NC}
+        → Verify primary server SSH access
+        → Check firewall settings
+        → Test from NAS: ./nas-backup-client.sh test
+        
+    ${YELLOW}❌ "Permission denied on NAS"${NC}
+        → Make script executable: chmod +x nas-backup-client.sh
+        → Check backup directory permissions
+        → Create directory: mkdir -p /volume1/backup/docker-backups
+        
+    ${YELLOW}❌ "Backup sync failed"${NC}
+        → Check network connectivity
+        → Verify primary server backup path
+        → Review SSH key permissions on primary
+        → Check disk space on NAS: df -h
+
+${BLUE}SYNOLOGY NAS INTEGRATION:${NC}
+    1. Upload script via File Station or SSH
+    2. Set LOCAL_BACKUP_PATH=/volume1/backup/docker-backups
+    3. Schedule via Control Panel > Task Scheduler
+    4. Create task: ./nas-backup-client.sh sync
+    5. Set appropriate schedule (daily/weekly)
+
+${YELLOW}💡 TIP: Generated script is completely self-contained - no dependencies on primary server${NC}
+
+EOF
+)"
+            ;;
+        update)
+            printf "%b" "$(cat << EOF
+Docker Backup Manager v${VERSION} - Update Command Help
+
+${BLUE}COMMAND:${NC} update
+${BLUE}PURPOSE:${NC} Update script to latest version from GitHub
+
+${BLUE}DESCRIPTION:${NC}
+Automatically updates Docker Backup Manager to the latest version:
+- Downloads latest release from GitHub
+- Backs up current version before updating
+- Verifies download integrity
+- Updates both user script and system script
+- Preserves existing configuration
+
+${BLUE}USAGE:${NC}
+    $0 [FLAGS] update
+    
+${BLUE}EXAMPLES:${NC}
+    $0 update                     # Interactive update with prompts
+    $0 --yes update               # Auto-confirm update
+
+${BLUE}UPDATE PROCESS:${NC}
+    1. Check internet connectivity to GitHub
+    2. Compare current vs latest version
+    3. Backup current version
+    4. Download and verify new version
+    5. Update user script and system script
+    6. Preserve configuration files
+    
+${BLUE}UPDATE OPTIONS:${NC}
+    • User script only (/path/to/backup-manager.sh)
+    • System script only (/opt/backup/backup-manager.sh)
+    • Both locations (recommended)
+    
+${BLUE}VERSION INFORMATION:${NC}
+    • Current version: ${VERSION}
+    • Latest version: Checked from GitHub releases
+    • Automatic version comparison
+    • Backup of previous version available
+    
+${BLUE}TROUBLESHOOTING:${NC}
+    ${YELLOW}❌ "No internet connection"${NC}
+        → Check connectivity: ping github.com
+        → Verify DNS resolution: nslookup github.com
+        → Check firewall/proxy settings
+        
+    ${YELLOW}❌ "GitHub API rate limit exceeded"${NC}
+        → Wait 60 minutes for rate limit reset
+        → Use authenticated requests if available
+        → Try again later
+        
+    ${YELLOW}❌ "Download verification failed"${NC}
+        → Corrupted download detected
+        → Check network stability
+        → Try update again
+        → May indicate network interference
+        
+    ${YELLOW}❌ "Permission denied updating system script"${NC}
+        → System script requires elevated privileges
+        → Check sudo access
+        → Verify /opt/backup/ directory permissions
+        
+    ${YELLOW}❌ "Backup of current version failed"${NC}
+        → Check available disk space
+        → Verify write permissions in backup directory
+        → May continue without backup (not recommended)
+
+${BLUE}ROLLBACK:${NC}
+    If update causes issues, restore from backup:
+    • Backup location: /opt/backup/backup-manager-{version}-{timestamp}.sh
+    • Copy backup over current script
+    • Restore both user and system scripts
+
+${YELLOW}💡 TIP: Always test updated script in development before production use${NC}
+
+EOF
+)"
+            ;;
+        uninstall)
+            printf "%b" "$(cat << EOF
+Docker Backup Manager v${VERSION} - Uninstall Command Help
+
+${BLUE}COMMAND:${NC} uninstall
+${BLUE}PURPOSE:${NC} Complete system cleanup and removal
+
+${RED}⚠️  WARNING: This is a destructive operation that cannot be undone!${NC}
+
+${BLUE}DESCRIPTION:${NC}
+Completely removes Docker Backup Manager and ALL data:
+- Stops and removes all containers
+- Removes all Docker images and volumes
+- Deletes all configuration files
+- Removes system directories (/opt/portainer, /opt/tools, /opt/backup)
+- Cleans up Docker networks and system
+
+${BLUE}USAGE:${NC}
+    $0 [FLAGS] uninstall
+    
+${BLUE}EXAMPLES:${NC}
+    $0 uninstall                  # Interactive with double confirmation
+    $0 --yes uninstall            # Still requires double confirmation
+
+${BLUE}UNINSTALL PROCESS:${NC}
+    1. ${RED}DOUBLE CONFIRMATION${NC} - Two separate confirmations required
+    2. Stop all running containers
+    3. Remove all containers and images
+    4. Clean Docker system (volumes, networks, cache)
+    5. Remove system directories and files
+    6. Remove configuration files
+    7. Clean up cron jobs and logs
+    
+${BLUE}WHAT GETS REMOVED:${NC}
+    • All Docker containers and images
+    • All Docker volumes and networks
+    • /opt/portainer/ directory (Portainer data)
+    • /opt/tools/ directory (nginx-proxy-manager, etc.)
+    • /opt/backup/ directory (ALL BACKUPS)
+    • /etc/docker-backup-manager.conf
+    • Cron jobs for scheduled backups
+    • Log files
+    
+${BLUE}WHAT GETS PRESERVED:${NC}
+    • Docker installation (only cleaned, not removed)
+    • System users (portainer user remains)
+    • SSH keys (in /home/portainer/.ssh/)
+    • Generated NAS scripts (if copied elsewhere)
+    
+${BLUE}BEFORE UNINSTALLING:${NC}
+    ${YELLOW}📋 RECOMMENDED STEPS:${NC}
+    1. Create final backup: $0 backup
+    2. Copy important data elsewhere
+    3. Export configurations if needed
+    4. Document any customizations
+    5. Save generated NAS scripts
+    
+${BLUE}TROUBLESHOOTING:${NC}
+    ${YELLOW}❌ "Container stop failed"${NC}
+        → Force removal will continue anyway
+        → Some containers may be unresponsive
+        → Manual cleanup may be needed: docker system prune -af
+        
+    ${YELLOW}❌ "Directory removal failed"${NC}
+        → Check if files are in use
+        → Verify permissions
+        → May need manual cleanup: sudo rm -rf /opt/portainer
+        
+    ${YELLOW}❌ "Cron job removal failed"${NC}
+        → Check cron permissions
+        → Manual removal: crontab -e (remove backup entries)
+        → System cron: sudo crontab -u portainer -r
+        
+${BLUE}POST-UNINSTALL CLEANUP:${NC}
+    Manual steps if needed:
+    • sudo docker system prune -af --volumes
+    • sudo rm -rf /opt/portainer /opt/tools /opt/backup
+    • sudo rm -f /etc/docker-backup-manager.conf
+    • sudo userdel portainer (if desired)
+
+${RED}⚠️  FINAL WARNING: This removes ALL backups and data permanently!${NC}
+
+EOF
+)"
+            ;;
+        *)
+            printf "%b\n" "${RED}Unknown command: $command${NC}"
+            printf "Use '$0 --help' to see all available commands\n"
+            ;;
+    esac
+}
+
 # Main function dispatcher
 main() {
     # Parse flags first - help should work even as root
     local temp_args=()
+    local has_command=false
+    
+    # First pass: check if we have a command followed by --help
+    for arg in "$@"; do
+        if [[ "$arg" =~ ^(setup|backup|restore|schedule|config|generate-nas-script|update|uninstall)$ ]]; then
+            has_command=true
+            break
+        fi
+    done
+    
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --yes|--auto-yes|-y)
@@ -4427,8 +4997,14 @@ main() {
                 shift 2
                 ;;
             --help|-h)
-                usage
-                exit 0
+                # If we have a command, let command-specific help handle it
+                if [[ "$has_command" == "true" ]]; then
+                    temp_args+=("$1")
+                    shift
+                else
+                    usage
+                    exit 0
+                fi
                 ;;
             -*)
                 error "Unknown flag: $1"
@@ -4453,8 +5029,19 @@ main() {
         set --
     fi
     
-    case "${1:-}" in
+    # Handle command-specific help
+    local command="${1:-}"
+    local help_requested="false"
+    if [[ "${2:-}" == "--help" || "${2:-}" == "-h" ]]; then
+        help_requested="true"
+    fi
+    
+    case "$command" in
         setup)
+            if [[ "$help_requested" == "true" ]]; then
+                show_command_help "setup"
+                exit 0
+            fi
             # Setup doesn't need to load config - it creates it
             install_dependencies
             setup_fixed_configuration
@@ -4521,24 +5108,40 @@ main() {
             success "Your Docker environment is ready for production use!"
             ;;
         backup)
+            if [[ "$help_requested" == "true" ]]; then
+                show_command_help "backup"
+                exit 0
+            fi
             install_dependencies
             load_config
-            check_setup_required || return 1
+            check_setup_required "backup" || return 1
             create_backup
             ;;
         restore)
+            if [[ "$help_requested" == "true" ]]; then
+                show_command_help "restore"
+                exit 0
+            fi
             install_dependencies
             load_config
-            check_setup_required || return 1
+            check_setup_required "restore" || return 1
             restore_backup
             ;;
         schedule)
+            if [[ "$help_requested" == "true" ]]; then
+                show_command_help "schedule"
+                exit 0
+            fi
             install_dependencies
             load_config
-            check_setup_required || return 1
+            check_setup_required "schedule" || return 1
             setup_schedule
             ;;
         config)
+            if [[ "$help_requested" == "true" ]]; then
+                show_command_help "config"
+                exit 0
+            fi
             install_dependencies
             load_config
             interactive_setup_configuration
@@ -4559,16 +5162,28 @@ main() {
             fi
             ;;
         generate-nas-script)
+            if [[ "$help_requested" == "true" ]]; then
+                show_command_help "generate-nas-script"
+                exit 0
+            fi
             install_dependencies
             load_config
-            check_setup_required || return 1
+            check_setup_required "generate-nas-script" || return 1
             generate_nas_script
             ;;
         update)
+            if [[ "$help_requested" == "true" ]]; then
+                show_command_help "update"
+                exit 0
+            fi
             install_dependencies
             update_script
             ;;
         uninstall)
+            if [[ "$help_requested" == "true" ]]; then
+                show_command_help "uninstall"
+                exit 0
+            fi
             install_dependencies
             uninstall_system
             ;;
@@ -4583,9 +5198,12 @@ main() {
             exit 1
             ;;
         *)
-            printf "%b\n" "${RED}❌ Unknown command: $1${NC}"
+            printf "%b\n" "${RED}❌ Unknown command: $command${NC}"
+            echo "💡 Did you mean one of these commands?"
+            echo "   • setup, backup, restore, schedule, config, update, uninstall"
+            echo "   • Use '$0 --help' to see all available commands"
+            echo "   • Use '$0 <command> --help' for command-specific help"
             echo
-            usage
             exit 1
             ;;
     esac

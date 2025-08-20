@@ -2012,6 +2012,86 @@ test_help_display_no_arguments() {
     return 0
 }
 
+# Test command-specific help functionality
+test_command_specific_help() {
+    info "Testing command-specific help functionality..."
+    
+    # Test backup command help
+    local backup_help
+    backup_help=$(export DOCKER_BACKUP_TEST=true && /home/vagrant/docker-stack-backup/backup-manager.sh backup --help 2>&1)
+    
+    # Check for command-specific help header
+    if echo "$backup_help" | grep -q "Backup Command Help"; then
+        success "Backup command help displays correctly"
+    else
+        error "Backup command help not working"
+        echo "DEBUG: backup help output: $backup_help"
+        return 1
+    fi
+    
+    # Check for command-specific content
+    if echo "$backup_help" | grep -q "BACKUP PROCESS:"; then
+        success "Backup-specific content found in help"
+    else
+        error "Backup-specific content missing from help"
+        return 1
+    fi
+    
+    # Test setup command help
+    local setup_help
+    setup_help=$(export DOCKER_BACKUP_TEST=true && /home/vagrant/docker-stack-backup/backup-manager.sh setup --help 2>&1)
+    
+    if echo "$setup_help" | grep -q "Setup Command Help"; then
+        success "Setup command help displays correctly"
+    else
+        error "Setup command help not working"
+        return 1
+    fi
+    
+    # Check for setup-specific troubleshooting
+    if echo "$setup_help" | grep -q "TROUBLESHOOTING:"; then
+        success "Setup-specific troubleshooting section found"
+    else
+        error "Setup-specific troubleshooting section missing"
+        return 1
+    fi
+    
+    # Test restore command help
+    local restore_help
+    restore_help=$(export DOCKER_BACKUP_TEST=true && /home/vagrant/docker-stack-backup/backup-manager.sh restore --help 2>&1)
+    
+    if echo "$restore_help" | grep -q "Restore Command Help"; then
+        success "Restore command help displays correctly"
+    else
+        error "Restore command help not working"
+        return 1
+    fi
+    
+    # Test that general help still works
+    local general_help
+    general_help=$(export DOCKER_BACKUP_TEST=true && /home/vagrant/docker-stack-backup/backup-manager.sh --help 2>&1)
+    
+    if echo "$general_help" | grep -q "WORKFLOW COMMANDS"; then
+        success "General help still works correctly"
+    else
+        error "General help broken"
+        return 1
+    fi
+    
+    # Test unknown command help
+    local unknown_help
+    unknown_help=$(export DOCKER_BACKUP_TEST=true && /home/vagrant/docker-stack-backup/backup-manager.sh unknown-command --help 2>&1 || true)
+    
+    if echo "$unknown_help" | grep -q "Unknown command: unknown-command"; then
+        success "Unknown command error message works correctly"
+    else
+        error "Unknown command error message not working"
+        return 1
+    fi
+    
+    return 0
+}
+
 # Test custom cron expression validation
 test_custom_cron_expression() {
     info "Testing custom cron expression validation..."
@@ -3752,6 +3832,7 @@ run_vm_tests() {
     run_test "NPM API Configuration" "test_npm_api_configuration"
     run_test "Credential Format with Domain" "test_credential_format_with_domain"
     run_test "Help Display No Arguments" "test_help_display_no_arguments"
+    run_test "Command-Specific Help" "test_command_specific_help"
     run_test "Custom Cron Expression" "test_custom_cron_expression"
     run_test "Cron Expression Examples" "test_cron_expression_examples"
     run_test "Migration Backup Creation" "test_migration_backup_creation"
