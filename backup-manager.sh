@@ -2467,6 +2467,12 @@ stop_containers() {
     info "Stopping containers gracefully..."
     info "Keeping Portainer running to manage backup process"
     
+    # Record which containers are currently running (excluding Portainer)
+    local running_containers_file="$TEMP_DIR/running_containers.txt"
+    sudo -u "$PORTAINER_USER" docker ps --format "{{.Names}}" | grep -v "^portainer$" > "$running_containers_file"
+    
+    info "Recording running containers for restoration: $(cat "$running_containers_file" | tr '\n' ' ')"
+    
     # Stop nginx-proxy-manager
     if sudo -u "$PORTAINER_USER" docker ps | grep -q "nginx-proxy-manager"; then
         sudo -u "$PORTAINER_USER" docker stop nginx-proxy-manager
@@ -2513,6 +2519,33 @@ start_containers() {
     sleep 10
     
     success "Core containers started"
+    
+    # Restart any standalone containers that were running before backup
+    local running_containers_file="$TEMP_DIR/running_containers.txt"
+    if [[ -f "$running_containers_file" ]]; then
+        info "Restoring standalone containers that were running before backup..."
+        
+        while read -r container_name; do
+            if [[ -n "$container_name" ]]; then
+                # Skip containers that are already managed by Portainer stacks
+                if [[ "$container_name" != "nginx-proxy-manager" ]]; then
+                    # Check if container exists and is not running
+                    if sudo -u "$PORTAINER_USER" docker ps -a --format "{{.Names}}" | grep -q "^${container_name}$"; then
+                        if ! sudo -u "$PORTAINER_USER" docker ps --format "{{.Names}}" | grep -q "^${container_name}$"; then
+                            info "Restarting standalone container: $container_name"
+                            sudo -u "$PORTAINER_USER" docker start "$container_name" || warn "Failed to restart container: $container_name"
+                        else
+                            info "Container already running: $container_name"
+                        fi
+                    else
+                        warn "Container no longer exists: $container_name"
+                    fi
+                fi
+            fi
+        done < "$running_containers_file"
+        
+        success "Standalone container restoration completed"
+    fi
 }
 
 # Restart Portainer stacks based on saved state with enhanced restoration
@@ -2625,12 +2658,121 @@ restore_enhanced_stacks() {
                         start_response=$(curl -s -X POST "$PORTAINER_API_URL/stacks/$stack_id/start" \
                             -H "Authorization: Bearer $jwt_token")
                         
-                        if echo "$start_response" | grep -q "error\|Error" 2>/dev/null; then
-                            warn "Failed to start stack: $stack_name - API Error: $start_response"
-                        else
-                            # Wait for stack to start up
+                        # Wait for stack to start up
+                        sleep 5
+                        
+                        # Verify the stack is actually running by checking container status
+                        local containers_running=false
+                        local retries=0
+                        local max_retries=8
+                        
+                        while [[ $retries -lt $max_retries ]]; do
+                            # Try multiple approaches to find running containers for this stack
+                            local running_containers=""
+                            
+                            # Method 1: Check by compose project label
+                            running_containers=$(sudo -u "$PORTAINER_USER" docker ps --filter "label=com.docker.compose.project=$stack_name" --format "{{.Names}}" 2>/dev/null || echo "")
+                            
+                            # Method 2: If no containers found, try checking by stack name in container names
+                            if [[ -z "$running_containers" ]]; then
+                                running_containers=$(sudo -u "$PORTAINER_USER" docker ps --format "{{.Names}}" | grep -E "^${stack_name}[_-]" 2>/dev/null || echo "")
+                            fi
+                            
+                            # Method 3: If still no containers, check by exact container name match
+                            if [[ -z "$running_containers" ]]; then
+                                running_containers=$(sudo -u "$PORTAINER_USER" docker ps --format "{{.Names}}" | grep -E "^${stack_name}$" 2>/dev/null || echo "")
+                            fi
+                            
+                            if [[ -n "$running_containers" ]]; then
+                                containers_running=true
+                                info "Found running containers for stack $stack_name: $running_containers"
+                                break
+                            else
+                                info "Attempt $((retries + 1))/$max_retries: No running containers found for stack $stack_name"
+                            fi
+                            
+                            # If API approach failed, try using Portainer API to redeploy the stack
+                            if [[ $retries -eq 3 ]]; then
+                                info "API start may have failed, attempting stack redeploy for: $stack_name"
+                                
+                                # Try to redeploy stack using Portainer API with the compose content
+                                if [[ -n "$compose_content" && "$compose_content" != "null" && "$compose_content" != "" ]]; then
+                                    # Get endpoint ID (usually 1 for local Docker)
+                                    local endpoint_id=1
+                                    
+                                    # Force stop the stack first
+                                    local stop_response
+                                    stop_response=$(curl -s -X POST "$PORTAINER_API_URL/stacks/$stack_id/stop" \
+                                        -H "Authorization: Bearer $jwt_token")
+                                    sleep 2
+                                    
+                                    # Then start it again with updated compose
+                                    local redeploy_payload
+                                    redeploy_payload=$(jq -n \
+                                        --arg compose "$compose_content" \
+                                        --argjson env "$env_vars" \
+                                        '{
+                                            stackFileContent: $compose,
+                                            env: $env,
+                                            prune: false
+                                        }')
+                                    
+                                    # Update and start the stack
+                                    local update_response
+                                    update_response=$(curl -s -X PUT "$PORTAINER_API_URL/stacks/$stack_id" \
+                                        -H "Authorization: Bearer $jwt_token" \
+                                        -H "Content-Type: application/json" \
+                                        -d "$redeploy_payload")
+                                    
+                                    sleep 3
+                                    info "Attempted stack redeploy for: $stack_name"
+                                fi
+                            fi
+                            
+                            retries=$((retries + 1))
                             sleep 3
+                        done
+                        
+                        if [[ "$containers_running" == "true" ]]; then
                             success "Restored running stack: $stack_name with enhanced configuration"
+                        else
+                            warn "Failed to start stack: $stack_name - containers not running after API attempts"
+                            warn "Stack configuration has been updated but containers are not running"
+                            
+                            # Try one final approach: direct docker-compose up in the stack directory
+                            info "Attempting direct container start for stack: $stack_name"
+                            
+                            # Get all containers that belong to this stack (including stopped ones)
+                            local all_stack_containers
+                            all_stack_containers=$(sudo -u "$PORTAINER_USER" docker ps -a --filter "label=com.docker.compose.project=$stack_name" --format "{{.Names}}" 2>/dev/null || echo "")
+                            
+                            if [[ -z "$all_stack_containers" ]]; then
+                                # Try alternative container name patterns
+                                all_stack_containers=$(sudo -u "$PORTAINER_USER" docker ps -a --format "{{.Names}}" | grep -E "^${stack_name}[_-]|^${stack_name}$" 2>/dev/null || echo "")
+                            fi
+                            
+                            if [[ -n "$all_stack_containers" ]]; then
+                                info "Found stack containers to start: $all_stack_containers"
+                                echo "$all_stack_containers" | while read -r container_name; do
+                                    if [[ -n "$container_name" ]]; then
+                                        info "Starting container: $container_name"
+                                        sudo -u "$PORTAINER_USER" docker start "$container_name" 2>/dev/null || warn "Failed to start container: $container_name"
+                                    fi
+                                done
+                                
+                                # Wait a moment and check again
+                                sleep 3
+                                local final_check
+                                final_check=$(sudo -u "$PORTAINER_USER" docker ps --format "{{.Names}}" | grep -E "^${stack_name}[_-]|^${stack_name}$" 2>/dev/null || echo "")
+                                
+                                if [[ -n "$final_check" ]]; then
+                                    success "Successfully started stack containers: $stack_name"
+                                else
+                                    warn "Stack containers may still not be running. Please check manually in Portainer UI."
+                                fi
+                            else
+                                warn "No containers found for stack: $stack_name. You may need to manually recreate this stack."
+                            fi
                         fi
                     else
                         # Stack was stopped during backup, leave it stopped
@@ -2851,6 +2993,9 @@ create_backup() {
     local temp_backup_dir="/tmp/${backup_name}"
     local final_backup_file="$BACKUP_PATH/${backup_name}.tar.gz"
     
+    # Set TEMP_DIR for use by other functions
+    TEMP_DIR="$temp_backup_dir"
+    
     # Create temporary backup directory
     mkdir -p "$temp_backup_dir"
     
@@ -2984,7 +3129,7 @@ restore_using_metadata() {
     info "Restoring permissions using metadata..."
     
     # Get permissions array from metadata
-    local permissionto s_count=$(jq '.permissions | length' "$metadata_file" 2>/dev/null || echo "0")
+    local permissions_count=$(jq '.permissions | length' "$metadata_file" 2>/dev/null || echo "0")
     
     if [[ "$permissions_count" -gt 0 ]] && [[ "$permissions_count" != "null" ]]; then
         local restored_count=0
@@ -5057,6 +5202,14 @@ main() {
                 ;;
         esac
     done
+    
+    # Validate config file early if specified
+    if [[ -n "$CONFIG_FILE" ]]; then
+        if [[ ! -f "$CONFIG_FILE" ]]; then
+            error "Configuration file not found: $CONFIG_FILE"
+            exit 1
+        fi
+    fi
     
     # Check root after flag parsing (help should work even as root)
     check_root
