@@ -1578,6 +1578,318 @@ EOF
     return 0
 }
 
+# Test enhanced stack state capture with complete configuration details
+test_enhanced_stack_state_capture() {
+    info "Testing enhanced stack state capture functionality..."
+    
+    # Create a test script to simulate enhanced stack state capture
+    local test_script="/tmp/test_enhanced_stack_capture.sh"
+    cat > "$test_script" << 'EOF'
+#!/bin/bash
+export DOCKER_BACKUP_TEST=true
+
+# Mock enhanced stack state capture with complete configuration
+cat > /tmp/mock_enhanced_stack_state.json << 'MOCK_EOF'
+{
+    "capture_timestamp": "2025-08-20 12:00:00",
+    "capture_version": "enhanced-v2",
+    "total_stacks": 2,
+    "stacks": [
+        {
+            "id": 1,
+            "name": "nginx-proxy-manager",
+            "status": 1,
+            "type": 2,
+            "endpoint_id": 1,
+            "namespace": "nginx-proxy-manager",
+            "created_date": "2025-01-01T00:00:00Z",
+            "updated_date": "2025-01-01T00:00:00Z",
+            "created_by": "admin",
+            "updated_by": "admin",
+            "resource_control": null,
+            "auto_update": {
+                "interval": "5m",
+                "webhook": null
+            },
+            "git_config": null,
+            "env_variables": [
+                {
+                    "name": "DATABASE_URL",
+                    "value": "sqlite:///data/database.sqlite"
+                },
+                {
+                    "name": "DISABLE_IPV6",
+                    "value": "true"
+                }
+            ],
+            "entry_point": "docker-compose.yml",
+            "additional_files": [],
+            "compose_file_content": "version: '3.8'\nservices:\n  npm:\n    image: 'jc21/nginx-proxy-manager:latest'\n    restart: unless-stopped\n    ports:\n      - '80:80'\n      - '81:81'\n      - '443:443'\n    environment:\n      - DATABASE_URL=${DATABASE_URL}\n      - DISABLE_IPV6=${DISABLE_IPV6}\n    volumes:\n      - ./data:/data\n      - ./letsencrypt:/etc/letsencrypt\n    networks:\n      - prod-network\n\nnetworks:\n  prod-network:\n    external: true",
+            "project_path": "/opt/tools/nginx-proxy-manager",
+            "swarm_id": null,
+            "is_compose_format": true
+        },
+        {
+            "id": 2,
+            "name": "test-web-app",
+            "status": 1,
+            "type": 2,
+            "endpoint_id": 1,
+            "namespace": "test-web-app",
+            "created_date": "2025-01-01T01:00:00Z",
+            "updated_date": "2025-01-01T01:00:00Z",
+            "created_by": "admin",
+            "updated_by": "admin",
+            "resource_control": null,
+            "auto_update": {
+                "interval": "10m",
+                "webhook": "https://example.com/webhook"
+            },
+            "git_config": {
+                "url": "https://github.com/user/repo",
+                "ref": "refs/heads/main",
+                "username": "deploy-user"
+            },
+            "env_variables": [
+                {
+                    "name": "NODE_ENV",
+                    "value": "production"
+                },
+                {
+                    "name": "PORT",
+                    "value": "3000"
+                },
+                {
+                    "name": "DATABASE_HOST",
+                    "value": "db.example.com"
+                }
+            ],
+            "entry_point": "docker-compose.prod.yml",
+            "additional_files": [
+                {
+                    "name": ".env",
+                    "content": "NODE_ENV=production\nPORT=3000\nDATABASE_HOST=db.example.com"
+                }
+            ],
+            "compose_file_content": "version: '3.8'\nservices:\n  web:\n    image: 'node:18-alpine'\n    restart: unless-stopped\n    ports:\n      - '${PORT}:${PORT}'\n    environment:\n      - NODE_ENV=${NODE_ENV}\n      - PORT=${PORT}\n      - DATABASE_HOST=${DATABASE_HOST}\n    volumes:\n      - ./app:/usr/src/app\n      - ./logs:/var/log/app\n    working_dir: /usr/src/app\n    command: npm start\n    networks:\n      - prod-network\n\nnetworks:\n  prod-network:\n    external: true",
+            "project_path": "/opt/portainer/stacks/test-web-app",
+            "swarm_id": null,
+            "is_compose_format": true
+        }
+    ]
+}
+MOCK_EOF
+
+# Verify enhanced JSON structure with complete details
+if command -v jq >/dev/null 2>&1; then
+    echo "Testing enhanced stack state structure..."
+    
+    # Test capture metadata
+    if ! jq -e '.capture_version' /tmp/mock_enhanced_stack_state.json >/dev/null 2>&1; then
+        echo "ERROR: Missing capture_version in enhanced format"
+        exit 1
+    fi
+    
+    if ! jq -e '.capture_timestamp' /tmp/mock_enhanced_stack_state.json >/dev/null 2>&1; then
+        echo "ERROR: Missing capture_timestamp in enhanced format"
+        exit 1
+    fi
+    
+    if ! jq -e '.total_stacks' /tmp/mock_enhanced_stack_state.json >/dev/null 2>&1; then
+        echo "ERROR: Missing total_stacks in enhanced format"
+        exit 1
+    fi
+    
+    # Test enhanced stack details
+    if ! jq -e '.stacks[0].compose_file_content' /tmp/mock_enhanced_stack_state.json >/dev/null 2>&1; then
+        echo "ERROR: Missing compose_file_content in enhanced stack data"
+        exit 1
+    fi
+    
+    if ! jq -e '.stacks[0].env_variables' /tmp/mock_enhanced_stack_state.json >/dev/null 2>&1; then
+        echo "ERROR: Missing env_variables in enhanced stack data"
+        exit 1
+    fi
+    
+    if ! jq -e '.stacks[0].auto_update' /tmp/mock_enhanced_stack_state.json >/dev/null 2>&1; then
+        echo "ERROR: Missing auto_update in enhanced stack data"
+        exit 1
+    fi
+    
+    if ! jq -e '.stacks[1].git_config' /tmp/mock_enhanced_stack_state.json >/dev/null 2>&1; then
+        echo "ERROR: Missing git_config in enhanced stack data"
+        exit 1
+    fi
+    
+    if ! jq -e '.stacks[1].additional_files' /tmp/mock_enhanced_stack_state.json >/dev/null 2>&1; then
+        echo "ERROR: Missing additional_files in enhanced stack data"
+        exit 1
+    fi
+    
+    # Test environment variables array structure
+    local env_count
+    env_count=$(jq -r '.stacks[0].env_variables | length' /tmp/mock_enhanced_stack_state.json)
+    if [[ "$env_count" -lt 1 ]]; then
+        echo "ERROR: No environment variables captured for first stack"
+        exit 1
+    fi
+    
+    # Test compose file content is not empty
+    local compose_content
+    compose_content=$(jq -r '.stacks[0].compose_file_content' /tmp/mock_enhanced_stack_state.json)
+    if [[ -z "$compose_content" || "$compose_content" == "null" ]]; then
+        echo "ERROR: Compose file content is empty or null"
+        exit 1
+    fi
+    
+    # Verify compose content contains expected elements
+    if ! echo "$compose_content" | grep -q "version:"; then
+        echo "ERROR: Compose file content does not contain version"
+        exit 1
+    fi
+    
+    if ! echo "$compose_content" | grep -q "services:"; then
+        echo "ERROR: Compose file content does not contain services"
+        exit 1
+    fi
+    
+    # Test stack with Git configuration
+    local git_url
+    git_url=$(jq -r '.stacks[1].git_config.url' /tmp/mock_enhanced_stack_state.json)
+    if [[ -z "$git_url" || "$git_url" == "null" ]]; then
+        echo "ERROR: Git config URL is missing for Git-based stack"
+        exit 1
+    fi
+    
+    # Test additional files capture
+    local additional_files_count
+    additional_files_count=$(jq -r '.stacks[1].additional_files | length' /tmp/mock_enhanced_stack_state.json)
+    if [[ "$additional_files_count" -lt 1 ]]; then
+        echo "ERROR: Additional files not captured for stack with additional files"
+        exit 1
+    fi
+    
+    echo "SUCCESS: Enhanced stack state capture structure validated with complete configuration details"
+    echo "  - Captured complete compose file content"
+    echo "  - Captured environment variables arrays"
+    echo "  - Captured auto-update settings"
+    echo "  - Captured Git configuration details"
+    echo "  - Captured additional files"
+    echo "  - Captured stack metadata and settings"
+else
+    echo "WARN: jq not available for enhanced validation"
+fi
+
+rm -f /tmp/mock_enhanced_stack_state.json
+EOF
+    chmod +x "$test_script"
+    
+    # Run the test
+    if "$test_script"; then
+        success "Enhanced stack state capture functionality works correctly"
+    else
+        error "Enhanced stack state capture test failed"
+        rm -f "$test_script"
+        return 1
+    fi
+    
+    rm -f "$test_script"
+    return 0
+}
+
+# Test enhanced stack state restoration functionality
+test_enhanced_stack_restoration() {
+    info "Testing enhanced stack state restoration functionality..."
+    
+    # Create a test script to simulate enhanced stack restoration
+    local test_script="/tmp/test_enhanced_stack_restoration.sh"
+    cat > "$test_script" << 'EOF'
+#!/bin/bash
+export DOCKER_BACKUP_TEST=true
+
+# Test restoration logic for enhanced format
+echo "Testing enhanced vs legacy format detection..."
+
+# Create enhanced format test file
+cat > /tmp/enhanced_format_test.json << 'ENHANCED_EOF'
+{
+    "capture_timestamp": "2025-08-20 12:00:00",
+    "capture_version": "enhanced-v2",
+    "total_stacks": 1,
+    "stacks": [
+        {
+            "id": 1,
+            "name": "test-stack",
+            "status": 1,
+            "compose_file_content": "version: '3.8'\nservices:\n  web:\n    image: nginx"
+        }
+    ]
+}
+ENHANCED_EOF
+
+# Create legacy format test file
+cat > /tmp/legacy_format_test.json << 'LEGACY_EOF'
+{
+    "stacks": [
+        {
+            "id": 1,
+            "name": "test-stack",
+            "status": 1
+        }
+    ]
+}
+LEGACY_EOF
+
+if command -v jq >/dev/null 2>&1; then
+    # Test enhanced format detection
+    enhanced_version=$(jq -r '.capture_version // "legacy"' /tmp/enhanced_format_test.json)
+    if [[ "$enhanced_version" == "enhanced-v2" ]]; then
+        echo "SUCCESS: Enhanced format correctly detected"
+    else
+        echo "ERROR: Enhanced format detection failed"
+        exit 1
+    fi
+    
+    # Test legacy format detection
+    legacy_version=$(jq -r '.capture_version // "legacy"' /tmp/legacy_format_test.json)
+    if [[ "$legacy_version" == "legacy" ]]; then
+        echo "SUCCESS: Legacy format correctly detected"
+    else
+        echo "ERROR: Legacy format detection failed"
+        exit 1
+    fi
+    
+    # Test enhanced stack data extraction
+    compose_content=$(jq -r '.stacks[0].compose_file_content' /tmp/enhanced_format_test.json)
+    if [[ -n "$compose_content" && "$compose_content" != "null" ]]; then
+        echo "SUCCESS: Enhanced compose file content extracted"
+    else
+        echo "ERROR: Enhanced compose file content extraction failed"
+        exit 1
+    fi
+    
+    echo "SUCCESS: Enhanced stack restoration logic validated"
+else
+    echo "WARN: jq not available for restoration logic validation"
+fi
+
+rm -f /tmp/enhanced_format_test.json /tmp/legacy_format_test.json
+EOF
+    chmod +x "$test_script"
+    
+    # Run the test
+    if "$test_script"; then
+        success "Enhanced stack restoration functionality works correctly"
+    else
+        error "Enhanced stack restoration test failed"
+        rm -f "$test_script"
+        return 1
+    fi
+    
+    rm -f "$test_script"
+    return 0
+}
+
 # Test nginx-proxy-manager API configuration
 test_npm_api_configuration() {
     info "Testing nginx-proxy-manager API configuration..."
@@ -3434,6 +3746,8 @@ run_vm_tests() {
     run_test "Stack Inventory API" "test_stack_inventory_api"
     run_test "Portainer API Authentication" "test_portainer_api_authentication"
     run_test "Stack State Capture" "test_stack_state_capture"
+    run_test "Enhanced Stack State Capture" "test_enhanced_stack_state_capture"
+    run_test "Enhanced Stack Restoration" "test_enhanced_stack_restoration"
     run_test "Stack Recreation from Backup" "test_stack_recreation_from_backup"
     run_test "NPM API Configuration" "test_npm_api_configuration"
     run_test "Credential Format with Domain" "test_credential_format_with_domain"

@@ -170,6 +170,7 @@ install_dependencies() {
                 wget) echo "  • $tool - Download files from web servers" ;;
                 jq) echo "  • $tool - Parse and manipulate JSON data" ;;
                 dnsutils) echo "  • $tool - DNS utilities (dig, nslookup)" ;;
+                cron) echo "  • $tool - Task scheduling daemon (provides crontab command)" ;;
                 *) echo "  • $tool - Required system tool" ;;
             esac
         done
@@ -2350,7 +2351,7 @@ create_npm_stack_in_portainer() {
 }
 
 
-# Get stack states from Portainer
+# Get detailed stack states from Portainer with enhanced capture
 get_stack_states() {
     local output_file="$1"
     
@@ -2383,18 +2384,82 @@ get_stack_states() {
         return 0
     fi
     
-    # Get stack information
+    # Get basic stack information
     local stacks_response
     stacks_response=$(curl -s -H "Authorization: Bearer $jwt_token" "$PORTAINER_API_URL/stacks")
     
-    # Create state information
-    local stack_states="{}"
+    # Create enhanced state information with detailed capture
+    local enhanced_stacks="[]"
     if [[ "$stacks_response" != "null" && -n "$stacks_response" ]]; then
-        stack_states=$(echo "$stacks_response" | jq '[.[] | {id: .Id, name: .Name, status: .Status}] | {stacks: .}')
+        info "Capturing enhanced stack details..."
+        
+        # Process each stack to get detailed information
+        local stack_ids
+        stack_ids=$(echo "$stacks_response" | jq -r '.[].Id')
+        
+        local stack_details_array="[]"
+        while read -r stack_id; do
+            if [[ -n "$stack_id" && "$stack_id" != "null" ]]; then
+                info "Capturing detailed information for stack ID: $stack_id"
+                
+                # Get detailed stack information
+                local stack_detail
+                stack_detail=$(curl -s -H "Authorization: Bearer $jwt_token" "$PORTAINER_API_URL/stacks/$stack_id")
+                
+                if [[ "$stack_detail" != "null" && -n "$stack_detail" ]]; then
+                    # Get stack file (compose.yml content)
+                    local stack_file
+                    stack_file=$(curl -s -H "Authorization: Bearer $jwt_token" "$PORTAINER_API_URL/stacks/$stack_id/file")
+                    
+                    # Enhance the stack detail with compose file content
+                    local enhanced_stack
+                    enhanced_stack=$(echo "$stack_detail" | jq --arg stack_file "$stack_file" '{
+                        id: .Id,
+                        name: .Name,
+                        status: .Status,
+                        type: .Type,
+                        endpoint_id: .EndpointId,
+                        namespace: .Namespace,
+                        created_date: .CreationDate,
+                        updated_date: .UpdateDate,
+                        created_by: .CreatedBy,
+                        updated_by: .UpdatedBy,
+                        resource_control: .ResourceControl,
+                        auto_update: .AutoUpdate,
+                        git_config: .GitConfig,
+                        env_variables: .Env,
+                        entry_point: .EntryPoint,
+                        additional_files: .AdditionalFiles,
+                        compose_file_content: $stack_file,
+                        project_path: .ProjectPath,
+                        swarm_id: .SwarmId,
+                        is_compose_format: .IsComposeFormat
+                    }')
+                    
+                    # Add to details array
+                    stack_details_array=$(echo "$stack_details_array" | jq --argjson stack "$enhanced_stack" '. + [$stack]')
+                else
+                    warn "Failed to get detailed information for stack $stack_id"
+                fi
+            fi
+        done <<< "$stack_ids"
+        
+        enhanced_stacks="$stack_details_array"
     fi
     
-    echo "$stack_states" > "$output_file"
-    info "Stack states captured: $(echo "$stack_states" | jq -r '.stacks | length') stacks"
+    # Create final state structure with metadata
+    local final_state
+    final_state=$(jq -n --argjson stacks "$enhanced_stacks" '{
+        capture_timestamp: (now | strftime("%Y-%m-%d %H:%M:%S")),
+        capture_version: "enhanced-v2",
+        total_stacks: ($stacks | length),
+        stacks: $stacks
+    }')
+    
+    echo "$final_state" > "$output_file"
+    local stack_count
+    stack_count=$(echo "$enhanced_stacks" | jq -r 'length')
+    success "Enhanced stack states captured: $stack_count stacks with complete configuration details"
 }
 
 # Stop containers gracefully (excluding Portainer)
@@ -2450,7 +2515,7 @@ start_containers() {
     success "Core containers started"
 }
 
-# Restart Portainer stacks based on saved state
+# Restart Portainer stacks based on saved state with enhanced restoration
 restart_stacks() {
     local state_file="$1"
     
@@ -2460,6 +2525,10 @@ restart_stacks() {
     fi
     
     source "$PORTAINER_PATH/.credentials"
+    
+    # Check if this is enhanced format or legacy format
+    local capture_version
+    capture_version=$(jq -r '.capture_version // "legacy"' "$state_file")
     
     # Login to Portainer API
     local auth_response
@@ -2475,12 +2544,141 @@ restart_stacks() {
         return 0
     fi
     
+    # Handle different state formats
+    if [[ "$capture_version" == "enhanced-v2" ]]; then
+        info "Processing enhanced stack state format v2"
+        restore_enhanced_stacks "$state_file" "$jwt_token"
+    else
+        info "Processing legacy stack state format"
+        restore_legacy_stacks "$state_file" "$jwt_token"
+    fi
+}
+
+# Restore stacks using enhanced format with complete configuration
+restore_enhanced_stacks() {
+    local state_file="$1"
+    local jwt_token="$2"
+    
     # Read stack states and restart running stacks
     local stack_count
     stack_count=$(jq -r '.stacks | length' "$state_file")
     
     if [[ "$stack_count" -gt 0 ]]; then
-        info "Restarting $stack_count stacks..."
+        info "Restoring $stack_count stacks with enhanced configuration..."
+        
+        # Get current stacks
+        local current_stacks
+        current_stacks=$(curl -s -H "Authorization: Bearer $jwt_token" "$PORTAINER_API_URL/stacks")
+        
+        # Process each stack for enhanced restoration
+        jq -c '.stacks[]' "$state_file" | while read -r stack_json; do
+            local stack_name stack_status stack_id compose_content env_vars
+            stack_name=$(echo "$stack_json" | jq -r '.name')
+            stack_status=$(echo "$stack_json" | jq -r '.status')
+            compose_content=$(echo "$stack_json" | jq -r '.compose_file_content // empty')
+            env_vars=$(echo "$stack_json" | jq -r '.env_variables // []')
+            
+            # Only restore stacks that were running (status 1)
+            if [[ "$stack_status" == "1" ]]; then
+                info "Restoring running stack: $stack_name"
+                
+                # Find existing stack ID
+                stack_id=$(echo "$current_stacks" | jq -r ".[] | select(.Name == \"$stack_name\") | .Id")
+                
+                if [[ -n "$stack_id" && "$stack_id" != "null" ]]; then
+                    # Stack exists - update and restart it
+                    info "Updating existing stack: $stack_name (ID: $stack_id)"
+                    
+                    # Update stack with enhanced configuration if we have compose content
+                    if [[ -n "$compose_content" && "$compose_content" != "null" && "$compose_content" != "" ]]; then
+                        # Prepare stack update payload
+                        local update_payload
+                        update_payload=$(jq -n \
+                            --arg compose "$compose_content" \
+                            --argjson env "$env_vars" \
+                            '{
+                                stackFileContent: $compose,
+                                env: $env,
+                                prune: false
+                            }')
+                        
+                        # Update the stack
+                        local update_response
+                        update_response=$(curl -s -X PUT "$PORTAINER_API_URL/stacks/$stack_id" \
+                            -H "Authorization: Bearer $jwt_token" \
+                            -H "Content-Type: application/json" \
+                            -d "$update_payload")
+                        
+                        if echo "$update_response" | jq -e . >/dev/null 2>&1; then
+                            info "Successfully updated stack configuration: $stack_name"
+                        else
+                            warn "Failed to update stack configuration: $stack_name"
+                        fi
+                    fi
+                    
+                    # Start the stack
+                    curl -s -X POST "$PORTAINER_API_URL/stacks/$stack_id/start" \
+                        -H "Authorization: Bearer $jwt_token" >/dev/null
+                    success "Restored stack: $stack_name with enhanced configuration"
+                else
+                    warn "Stack not found in current Portainer installation: $stack_name"
+                    
+                    # Optionally recreate the stack if compose content is available
+                    if [[ -n "$compose_content" && "$compose_content" != "null" && "$compose_content" != "" ]]; then
+                        info "Attempting to recreate missing stack: $stack_name"
+                        
+                        # Get endpoint ID (usually 1 for local Docker)
+                        local endpoint_id=1
+                        
+                        # Prepare stack creation payload
+                        local create_payload
+                        create_payload=$(jq -n \
+                            --arg name "$stack_name" \
+                            --arg compose "$compose_content" \
+                            --argjson env "$env_vars" \
+                            --argjson endpoint_id "$endpoint_id" \
+                            '{
+                                name: $name,
+                                stackFileContent: $compose,
+                                env: $env,
+                                fromAppTemplate: false
+                            }')
+                        
+                        # Create the stack
+                        local create_response
+                        create_response=$(curl -s -X POST "$PORTAINER_API_URL/stacks?type=2&method=string&endpointId=$endpoint_id" \
+                            -H "Authorization: Bearer $jwt_token" \
+                            -H "Content-Type: application/json" \
+                            -d "$create_payload")
+                        
+                        if echo "$create_response" | jq -e '.Id' >/dev/null 2>&1; then
+                            success "Successfully recreated stack: $stack_name"
+                        else
+                            error "Failed to recreate stack: $stack_name"
+                            warn "Create response: $create_response"
+                        fi
+                    fi
+                fi
+            else
+                info "Skipping stopped stack: $stack_name (was not running during backup)"
+            fi
+        done
+        
+        success "Enhanced stack restoration completed"
+    fi
+}
+
+# Restore stacks using legacy format (backwards compatibility)
+restore_legacy_stacks() {
+    local state_file="$1"
+    local jwt_token="$2"
+    
+    # Read stack states and restart running stacks
+    local stack_count
+    stack_count=$(jq -r '.stacks | length' "$state_file")
+    
+    if [[ "$stack_count" -gt 0 ]]; then
+        info "Restarting $stack_count stacks (legacy format)..."
         
         # Get current stacks
         local current_stacks
@@ -2747,7 +2945,7 @@ restore_using_metadata() {
     info "Restoring permissions using metadata..."
     
     # Get permissions array from metadata
-    local permissions_count=$(jq '.permissions | length' "$metadata_file" 2>/dev/null || echo "0")
+    local permissionto s_count=$(jq '.permissions | length' "$metadata_file" 2>/dev/null || echo "0")
     
     if [[ "$permissions_count" -gt 0 ]] && [[ "$permissions_count" != "null" ]]; then
         local restored_count=0
