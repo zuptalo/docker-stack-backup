@@ -2881,6 +2881,9 @@ create_backup() {
     # Start containers again
     start_containers
     
+    # Restart stacks that were running before backup
+    restart_stacks "$temp_backup_dir/stack_states.json"
+    
     # Clean up temporary directory
     rm -rf "$temp_backup_dir"
     
