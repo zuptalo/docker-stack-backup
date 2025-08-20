@@ -2578,12 +2578,15 @@ restore_enhanced_stacks() {
             compose_content=$(echo "$stack_json" | jq -r '.compose_file_content // empty')
             env_vars=$(echo "$stack_json" | jq -r '.env_variables // []')
             
-            # Only restore stacks that were running (status 1)
+            # Restore all stacks but handle running vs stopped state appropriately
             if [[ "$stack_status" == "1" ]]; then
                 info "Restoring running stack: $stack_name"
-                
-                # Find existing stack ID
-                stack_id=$(echo "$current_stacks" | jq -r ".[] | select(.Name == \"$stack_name\") | .Id")
+            else
+                info "Restoring stopped stack: $stack_name (will remain stopped)"
+            fi
+            
+            # Find existing stack ID
+            stack_id=$(echo "$current_stacks" | jq -r ".[] | select(.Name == \"$stack_name\") | .Id")
                 
                 if [[ -n "$stack_id" && "$stack_id" != "null" ]]; then
                     # Stack exists - update and restart it
@@ -2616,10 +2619,15 @@ restore_enhanced_stacks() {
                         fi
                     fi
                     
-                    # Start the stack
-                    curl -s -X POST "$PORTAINER_API_URL/stacks/$stack_id/start" \
-                        -H "Authorization: Bearer $jwt_token" >/dev/null
-                    success "Restored stack: $stack_name with enhanced configuration"
+                    # Start the stack only if it was running during backup
+                    if [[ "$stack_status" == "1" ]]; then
+                        curl -s -X POST "$PORTAINER_API_URL/stacks/$stack_id/start" \
+                            -H "Authorization: Bearer $jwt_token" >/dev/null
+                        success "Restored running stack: $stack_name with enhanced configuration"
+                    else
+                        # Stack was stopped during backup, leave it stopped
+                        success "Restored stopped stack: $stack_name (kept in stopped state)"
+                    fi
                 else
                     warn "Stack not found in current Portainer installation: $stack_name"
                     
@@ -2652,16 +2660,22 @@ restore_enhanced_stacks() {
                             -d "$create_payload")
                         
                         if echo "$create_response" | jq -e '.Id' >/dev/null 2>&1; then
-                            success "Successfully recreated stack: $stack_name"
+                            if [[ "$stack_status" == "1" ]]; then
+                                success "Successfully recreated running stack: $stack_name"
+                            else
+                                # Stop the newly created stack if it was stopped during backup
+                                local new_stack_id
+                                new_stack_id=$(echo "$create_response" | jq -r '.Id')
+                                curl -s -X POST "$PORTAINER_API_URL/stacks/$new_stack_id/stop" \
+                                    -H "Authorization: Bearer $jwt_token" >/dev/null
+                                success "Successfully recreated stopped stack: $stack_name (kept in stopped state)"
+                            fi
                         else
                             error "Failed to recreate stack: $stack_name"
                             warn "Create response: $create_response"
                         fi
                     fi
                 fi
-            else
-                info "Skipping stopped stack: $stack_name (was not running during backup)"
-            fi
         done
         
         success "Enhanced stack restoration completed"
