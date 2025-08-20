@@ -272,19 +272,28 @@ This document tracks the implementation of missing features and improvements ide
   - ✅ `test_cron_expression_examples()` - Verifies examples and format explanation display
   - ✅ Integration with existing schedule command testing
 
-### 🔴 **13. Enhanced Stack State Capture**
-- **Status**: ❌ Not Started
+### ✅ **13. Enhanced Stack State Capture**
+- **Status**: ✅ Completed
 - **Priority**: Medium
 - **Description**: Ensure complete stack configurations, environment variables, and stack-level settings are captured
 - **Requirements**:
-  - Capture complete compose YAML files
-  - Capture environment variables set in Portainer UI
-  - Capture stack-level settings (auto-update policies, etc.)
-  - Store in structured format for reliable restoration
-- **Test Cases Needed**:
-  - `test_complete_stack_state_capture()`
-  - `test_stack_environment_variables()`
-  - `test_stack_settings_preservation()`
+  - ✅ Capture complete compose YAML files
+  - ✅ Capture environment variables set in Portainer UI
+  - ✅ Capture stack-level settings (auto-update policies, etc.)
+  - ✅ Store in structured format for reliable restoration
+- **Implementation Details**:
+  - Enhanced `get_stack_states()` function (lines 2355-2463) captures comprehensive stack configuration
+  - Makes detailed Portainer API calls: `/stacks`, `/stacks/{id}`, and `/stacks/{id}/file`
+  - Captures complete compose file content, environment variables arrays, auto-update settings, Git configuration
+  - Includes additional files, resource control settings, project paths, and metadata
+  - Creates structured JSON with capture timestamps and version information for reliable restoration
+  - Supports both enhanced format and backward compatibility with legacy format
+- **Test Cases Implemented**:
+  - ✅ `test_stack_state_capture()` (lines 1612+) - Basic stack state capture functionality
+  - ✅ `test_enhanced_stack_state_capture()` (lines 1725+) - Advanced validation with complete configuration details
+  - ✅ `test_stack_recreation_from_backup()` (lines 1669+) - Stack recreation logic validation
+  - ✅ `test_restore_with_stack_state()` (lines 3545+) - Integration testing with real backup files
+  - ✅ All tests validate JSON structure, compose content, environment variables, auto-update settings, and Git configuration
 
 ---
 
@@ -555,7 +564,7 @@ This document tracks the implementation of missing features and improvements ide
 **✅ COMPLETED PHASES:**
 - **Phase 1: Critical Missing Functionality** - ✅ 100% Complete (Items 1-6)
 - **Phase 2: Enhanced Testing (High Priority)** - ✅ 100% Complete (Items 7-9)  
-- **Phase 3: Functional Improvements (Medium Priority)** - ✅ 75% Complete (Items 10-12)
+- **Phase 3: Functional Improvements (Medium Priority)** - ✅ 100% Complete (Items 10-13)
 - **Phase 6: Real-World User Issues (Critical Priority)** - ✅ 100% Complete (Items 20-25)
 
 **🚀 PRODUCTION READINESS ACHIEVED:**
@@ -564,12 +573,11 @@ All critical blockers and high-priority functionality have been implemented and 
 ### 📋 **REMAINING OPTIONAL ENHANCEMENTS (Lower Priority):**
 
 **Next Implementation Priority (Optional):**
-1. **Item 13 (Enhanced Stack State Capture)** - Improved stack configuration preservation
-2. **Item 26 (Command-Specific Help)** - Enhanced user experience
-3. **Item 27 (Dependency Installation Automation)** - Setup friction reduction
-4. **Items 14-16 (Enhanced Testing Coverage)** - Additional test scenarios
-5. **Items 17-19 (Quality Improvements)** - Polish and refinement features
-6. **Items 28-29 (Error Recovery & Progress)** - User experience enhancements
+1. **Item 26 (Command-Specific Help)** - Enhanced user experience
+2. **Item 27 (Dependency Installation Automation)** - Setup friction reduction
+3. **Items 14-16 (Enhanced Testing Coverage)** - Additional test scenarios
+4. **Items 17-19 (Quality Improvements)** - Polish and refinement features
+5. **Items 28-29 (Error Recovery & Progress)** - User experience enhancements
 
 **Current State**: The system is fully functional and production-ready. Remaining items are enhancements that would further improve the user experience but are not blockers for deployment or usage.
 
