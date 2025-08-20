@@ -3134,14 +3134,30 @@ restore_using_metadata() {
     if [[ "$permissions_count" -gt 0 ]] && [[ "$permissions_count" != "null" ]]; then
         local restored_count=0
         
-        # Process each permission entry (with a reasonable limit)
-        local max_permissions=1000
+        # Process each permission entry (with a reasonable limit and timeout)
+        local max_permissions=500  # Reduced limit for better performance
         local actual_count=$((permissions_count > max_permissions ? max_permissions : permissions_count))
         
+        # Set a timeout for the permission restoration process (5 minutes max)
+        local start_time=$(date +%s)
+        local timeout_seconds=300
+        
+        info "Restoring permissions for $actual_count files/directories..."
+        
         for ((i=0; i<actual_count; i++)); do
-            # Break if this is taking too long (safety mechanism)
-            if [[ $((i % 10)) -eq 0 ]] && [[ $i -gt 0 ]]; then
-                info "Processing permission entry $i/$actual_count"
+            # Check timeout every 25 items for more responsive monitoring
+            if [[ $((i % 25)) -eq 0 ]] && [[ $i -gt 0 ]]; then
+                local current_time=$(date +%s)
+                local elapsed=$((current_time - start_time))
+                
+                info "Processed $i/$actual_count permission entries (${elapsed}s elapsed, ${timeout_seconds}s max)"
+                
+                # Break if timeout exceeded
+                if [[ $elapsed -gt $timeout_seconds ]]; then
+                    warn "Permission restoration timeout exceeded (${timeout_seconds}s), stopping to continue with container startup"
+                    warn "Processed $i/$actual_count entries before timeout"
+                    break
+                fi
             fi
             
             local path=$(jq -r ".permissions[$i].path // empty" "$metadata_file" 2>/dev/null || echo "")
@@ -3170,7 +3186,15 @@ restore_using_metadata() {
             fi
         done
         
-        success "Restored permissions for $restored_count files/directories"
+        local end_time=$(date +%s)
+        local total_elapsed=$((end_time - start_time))
+        success "Restored permissions for $restored_count files/directories in ${total_elapsed}s"
+        
+        # If we hit the limit, warn the user
+        if [[ $actual_count -lt $permissions_count ]]; then
+            warn "Only processed $actual_count of $permissions_count permission entries due to safety limits"
+            warn "Some file permissions may not have been fully restored"
+        fi
     else
         warn "No permission information found in metadata"
     fi
@@ -3302,6 +3326,38 @@ restore_backup() {
             restart_stacks "$stack_state_file"
             sudo rm -f "$stack_state_file"
         fi
+    fi
+    
+    # Ensure all previously running containers are restarted
+    info "Ensuring all containers are properly restarted..."
+    local running_containers_file="$TEMP_DIR/running_containers.txt"
+    if [[ -f "$running_containers_file" ]]; then
+        while read -r container_name; do
+            if [[ -n "$container_name" ]] && [[ "$container_name" != "portainer" ]]; then
+                # Check if container exists and start it if not running
+                if sudo -u "$PORTAINER_USER" docker ps -a --format "{{.Names}}" | grep -q "^${container_name}$"; then
+                    if ! sudo -u "$PORTAINER_USER" docker ps --format "{{.Names}}" | grep -q "^${container_name}$"; then
+                        info "Starting container: $container_name"
+                        sudo -u "$PORTAINER_USER" docker start "$container_name" || warn "Failed to start container: $container_name"
+                    else
+                        info "Container already running: $container_name"
+                    fi
+                else
+                    warn "Container no longer exists: $container_name"
+                fi
+            fi
+        done < "$running_containers_file"
+    else
+        warn "No running containers file found, attempting to start common containers"
+        # Try to start common containers that might have been stopped
+        for container in nginx-proxy-manager gitea vaultwarden; do
+            if sudo -u "$PORTAINER_USER" docker ps -a --format "{{.Names}}" | grep -q "^${container}$"; then
+                if ! sudo -u "$PORTAINER_USER" docker ps --format "{{.Names}}" | grep -q "^${container}$"; then
+                    info "Starting container: $container"
+                    sudo -u "$PORTAINER_USER" docker start "$container" || warn "Failed to start container: $container"
+                fi
+            fi
+        done
     fi
     
     # Validate restore success

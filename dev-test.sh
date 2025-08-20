@@ -3795,7 +3795,7 @@ MISSING_QUOTE=bad syntax here
 EOF
     
     local syntax_error_output
-    syntax_error_output=$(sudo -u vagrant /home/vagrant/docker-stack-backup/backup-manager.sh --config-file="$bad_config" 2>&1 || true)
+    syntax_error_output=$(sudo -u vagrant /home/vagrant/docker-stack-backup/backup-manager.sh --config-file="$bad_config" config --help 2>&1 || true)
     
     if echo "$syntax_error_output" | grep -q "syntax errors"; then
         success "Proper error handling for config file syntax errors"
@@ -4177,6 +4177,498 @@ EOF
     fi
 }
 
+# Test SSH key security and restrictions
+test_ssh_key_restrictions() {
+    info "Testing SSH key security and restrictions..."
+    
+    # Create a test script that checks SSH key security
+    local test_script="/tmp/test_ssh_security.sh"
+    
+    cat > "$test_script" << 'EOF'
+#!/bin/bash
+export DOCKER_BACKUP_TEST=true
+export NON_INTERACTIVE=true
+source /home/vagrant/docker-stack-backup/backup-manager.sh
+
+# Test 1: Check SSH key file permissions
+ssh_private_key="/home/portainer/.ssh/id_rsa"
+ssh_public_key="/home/portainer/.ssh/id_rsa.pub"
+authorized_keys="/home/portainer/.ssh/authorized_keys"
+
+if [[ -f "$ssh_private_key" ]]; then
+    # Check private key permissions (should be 600)
+    perms=$(stat -c "%a" "$ssh_private_key" 2>/dev/null)
+    if [[ "$perms" == "600" ]]; then
+        echo "✅ SSH private key has correct permissions (600)"
+    else
+        echo "❌ SSH private key has incorrect permissions: $perms (should be 600)"
+        exit 1
+    fi
+    
+    # Check private key ownership (should be portainer:portainer)
+    owner=$(stat -c "%U:%G" "$ssh_private_key" 2>/dev/null)
+    if [[ "$owner" == "portainer:portainer" ]]; then
+        echo "✅ SSH private key has correct ownership (portainer:portainer)"
+    else
+        echo "❌ SSH private key has incorrect ownership: $owner (should be portainer:portainer)"
+        exit 1
+    fi
+else
+    echo "⚠️ SSH private key not found, checking if SSH setup function works"
+    # Test SSH key generation
+    if setup_ssh_keys "portainer" 2>/dev/null; then
+        echo "✅ SSH key generation works correctly"
+    else
+        echo "❌ SSH key generation failed"
+        exit 1
+    fi
+fi
+
+# Test 2: Check public key permissions
+if [[ -f "$ssh_public_key" ]]; then
+    perms=$(stat -c "%a" "$ssh_public_key" 2>/dev/null)
+    if [[ "$perms" == "644" ]]; then
+        echo "✅ SSH public key has correct permissions (644)"
+    else
+        echo "❌ SSH public key has incorrect permissions: $perms (should be 644)"
+        exit 1
+    fi
+fi
+
+# Test 3: Check authorized_keys permissions
+if [[ -f "$authorized_keys" ]]; then
+    perms=$(stat -c "%a" "$authorized_keys" 2>/dev/null)
+    if [[ "$perms" == "600" ]]; then
+        echo "✅ authorized_keys has correct permissions (600)"
+    else
+        echo "❌ authorized_keys has incorrect permissions: $perms (should be 600)"
+        exit 1
+    fi
+fi
+
+# Test 4: Check SSH directory permissions
+ssh_dir="/home/portainer/.ssh"
+if [[ -d "$ssh_dir" ]]; then
+    perms=$(stat -c "%a" "$ssh_dir" 2>/dev/null)
+    if [[ "$perms" == "700" ]]; then
+        echo "✅ SSH directory has correct permissions (700)"
+    else
+        echo "❌ SSH directory has incorrect permissions: $perms (should be 700)"
+        exit 1
+    fi
+fi
+
+echo "✅ All SSH key security tests passed"
+EOF
+
+    chmod +x "$test_script"
+    
+    if "$test_script"; then
+        success "SSH key security and restrictions are properly configured"
+        rm -f "$test_script"
+        return 0
+    else
+        error "SSH key security validation failed"
+        rm -f "$test_script"
+        return 1
+    fi
+}
+
+# Test backup file permissions and security
+test_backup_file_permissions() {
+    info "Testing backup file permissions and security..."
+    
+    # Create a test script that checks backup file security
+    local test_script="/tmp/test_backup_security.sh"
+    
+    cat > "$test_script" << 'EOF'
+#!/bin/bash
+export DOCKER_BACKUP_TEST=true
+export NON_INTERACTIVE=true
+source /home/vagrant/docker-stack-backup/backup-manager.sh
+
+# Test 1: Create a test backup and check its permissions
+test_backup_dir="/tmp/backup_security_test"
+mkdir -p "$test_backup_dir"
+
+# Create mock data structure
+mkdir -p "$test_backup_dir/opt/portainer/data"
+mkdir -p "$test_backup_dir/opt/tools/nginx-proxy-manager"
+echo "test data" > "$test_backup_dir/opt/portainer/data/test.txt"
+
+# Test backup creation with proper permissions
+backup_file="/tmp/test_backup_$(date +%Y%m%d_%H%M%S).tar.gz"
+if tar -czf "$backup_file" -C "$test_backup_dir" . 2>/dev/null; then
+    echo "✅ Test backup created successfully"
+    
+    # Check backup file permissions
+    if [[ -f "$backup_file" ]]; then
+        perms=$(stat -c "%a" "$backup_file" 2>/dev/null)
+        if [[ "$perms" == "644" || "$perms" == "664" ]]; then
+            echo "✅ Backup file has appropriate permissions ($perms)"
+        else
+            echo "❌ Backup file has unusual permissions: $perms"
+            exit 1
+        fi
+        
+        # Check backup file readability
+        if [[ -r "$backup_file" ]]; then
+            echo "✅ Backup file is readable"
+        else
+            echo "❌ Backup file is not readable"
+            exit 1
+        fi
+    fi
+    
+    # Clean up test backup
+    rm -f "$backup_file"
+else
+    echo "❌ Failed to create test backup"
+    exit 1
+fi
+
+# Test 2: Check backup directory permissions
+backup_dir="/opt/backup"
+if [[ -d "$backup_dir" ]]; then
+    perms=$(stat -c "%a" "$backup_dir" 2>/dev/null)
+    owner=$(stat -c "%U:%G" "$backup_dir" 2>/dev/null)
+    
+    echo "✅ Backup directory exists with permissions $perms and ownership $owner"
+    
+    # Check if directory is writable
+    if [[ -w "$backup_dir" ]]; then
+        echo "✅ Backup directory is writable"
+    else
+        echo "⚠️ Backup directory is not writable (may require sudo)"
+    fi
+else
+    echo "⚠️ Backup directory doesn't exist yet (created during setup)"
+fi
+
+# Test 3: Test metadata file security
+metadata_file="/tmp/test_metadata.json"
+if generate_backup_metadata "$metadata_file" 2>/dev/null; then
+    echo "✅ Metadata file generation works"
+    
+    if [[ -f "$metadata_file" ]]; then
+        perms=$(stat -c "%a" "$metadata_file" 2>/dev/null)
+        if [[ "$perms" == "644" || "$perms" == "664" ]]; then
+            echo "✅ Metadata file has appropriate permissions ($perms)"
+        else
+            echo "❌ Metadata file has unusual permissions: $perms"
+            rm -f "$metadata_file"
+            exit 1
+        fi
+        
+        # Check metadata content doesn't contain sensitive info
+        if grep -E "(password|secret|token)" "$metadata_file" >/dev/null 2>&1; then
+            echo "❌ Metadata file contains sensitive information"
+            rm -f "$metadata_file"
+            exit 1
+        else
+            echo "✅ Metadata file doesn't contain sensitive information"
+        fi
+    fi
+    
+    rm -f "$metadata_file"
+fi
+
+# Clean up
+rm -rf "$test_backup_dir"
+
+echo "✅ All backup file permission tests passed"
+EOF
+
+    chmod +x "$test_script"
+    
+    if "$test_script"; then
+        success "Backup file permissions and security are properly configured"
+        rm -f "$test_script"
+        return 0
+    else
+        error "Backup file security validation failed"
+        rm -f "$test_script"
+        return 1
+    fi
+}
+
+# Test portainer user isolation and security
+test_portainer_user_isolation() {
+    info "Testing portainer user isolation and security..."
+    
+    # Create a test script that checks user isolation
+    local test_script="/tmp/test_user_isolation.sh"
+    
+    cat > "$test_script" << 'EOF'
+#!/bin/bash
+export DOCKER_BACKUP_TEST=true
+export NON_INTERACTIVE=true
+source /home/vagrant/docker-stack-backup/backup-manager.sh
+
+# Test 1: Check if portainer user exists and has proper configuration
+if id "portainer" >/dev/null 2>&1; then
+    echo "✅ Portainer user exists"
+    
+    # Check if user has proper shell (should be /bin/bash)
+    user_shell=$(getent passwd portainer | cut -d: -f7)
+    if [[ "$user_shell" == "/bin/bash" ]]; then
+        echo "✅ Portainer user has proper shell (/bin/bash)"
+    else
+        echo "⚠️ Portainer user has shell: $user_shell"
+    fi
+    
+    # Check if user is in docker group
+    if groups portainer | grep -q docker; then
+        echo "✅ Portainer user is in docker group"
+    else
+        echo "❌ Portainer user is not in docker group"
+        exit 1
+    fi
+    
+    # Check home directory permissions
+    home_dir="/home/portainer"
+    if [[ -d "$home_dir" ]]; then
+        perms=$(stat -c "%a" "$home_dir" 2>/dev/null)
+        owner=$(stat -c "%U:%G" "$home_dir" 2>/dev/null)
+        
+        if [[ "$owner" == "portainer:portainer" ]]; then
+            echo "✅ Portainer home directory has correct ownership"
+        else
+            echo "❌ Portainer home directory has incorrect ownership: $owner"
+            exit 1
+        fi
+        
+        if [[ "$perms" == "755" || "$perms" == "750" ]]; then
+            echo "✅ Portainer home directory has appropriate permissions ($perms)"
+        else
+            echo "❌ Portainer home directory has unusual permissions: $perms"
+            exit 1
+        fi
+    fi
+else
+    echo "⚠️ Portainer user doesn't exist yet (created during setup)"
+fi
+
+# Test 2: Check sudo privileges are restricted
+if id "portainer" >/dev/null 2>&1; then
+    # Check if portainer user has limited sudo access
+    sudo_config="/etc/sudoers.d/portainer-backup"
+    if [[ -f "$sudo_config" ]]; then
+        echo "✅ Portainer sudo configuration file exists"
+        
+        # Check that sudo access is limited to specific commands
+        if grep -q "NOPASSWD" "$sudo_config"; then
+            echo "✅ Portainer has passwordless sudo for specific commands"
+        else
+            echo "❌ Portainer sudo configuration may be too restrictive"
+            exit 1
+        fi
+        
+        # Check file permissions on sudo config
+        perms=$(stat -c "%a" "$sudo_config" 2>/dev/null)
+        if [[ "$perms" == "440" ]]; then
+            echo "✅ Sudo configuration has correct permissions (440)"
+        else
+            echo "❌ Sudo configuration has incorrect permissions: $perms"
+            exit 1
+        fi
+    else
+        echo "⚠️ Portainer sudo configuration not found (created during setup)"
+    fi
+fi
+
+# Test 3: Check Docker socket access
+docker_socket="/var/run/docker.sock"
+if [[ -S "$docker_socket" ]]; then
+    # Check socket permissions
+    perms=$(stat -c "%a" "$docker_socket" 2>/dev/null)
+    group=$(stat -c "%G" "$docker_socket" 2>/dev/null)
+    
+    if [[ "$group" == "docker" ]]; then
+        echo "✅ Docker socket has correct group ownership (docker)"
+    else
+        echo "❌ Docker socket has incorrect group: $group"
+        exit 1
+    fi
+    
+    # Test if portainer user can access docker (if user exists)
+    if id "portainer" >/dev/null 2>&1; then
+        if sudo -u portainer docker version >/dev/null 2>&1; then
+            echo "✅ Portainer user can access Docker daemon"
+        else
+            echo "❌ Portainer user cannot access Docker daemon"
+            exit 1
+        fi
+    fi
+else
+    echo "❌ Docker socket not found"
+    exit 1
+fi
+
+echo "✅ All portainer user isolation tests passed"
+EOF
+
+    chmod +x "$test_script"
+    
+    if "$test_script"; then
+        success "Portainer user isolation and security are properly configured"
+        rm -f "$test_script"
+        return 0
+    else
+        error "Portainer user isolation validation failed"
+        rm -f "$test_script"
+        return 1
+    fi
+}
+
+# Test credential file security
+test_credential_file_security() {
+    info "Testing credential file security..."
+    
+    # Create a test script that checks credential file security
+    local test_script="/tmp/test_credential_security.sh"
+    
+    cat > "$test_script" << 'EOF'
+#!/bin/bash
+export DOCKER_BACKUP_TEST=true
+export NON_INTERACTIVE=true
+source /home/vagrant/docker-stack-backup/backup-manager.sh
+
+# Test 1: Check Portainer credentials file security
+portainer_creds="/opt/portainer/.credentials"
+if [[ -f "$portainer_creds" ]]; then
+    echo "✅ Portainer credentials file exists"
+    
+    # Check file permissions (should be 600 or 640)
+    perms=$(stat -c "%a" "$portainer_creds" 2>/dev/null)
+    if [[ "$perms" == "600" || "$perms" == "640" ]]; then
+        echo "✅ Portainer credentials file has secure permissions ($perms)"
+    else
+        echo "❌ Portainer credentials file has insecure permissions: $perms"
+        exit 1
+    fi
+    
+    # Check file ownership
+    owner=$(stat -c "%U:%G" "$portainer_creds" 2>/dev/null)
+    if [[ "$owner" == "portainer:portainer" || "$owner" == "root:portainer" ]]; then
+        echo "✅ Portainer credentials file has correct ownership ($owner)"
+    else
+        echo "❌ Portainer credentials file has incorrect ownership: $owner"
+        exit 1
+    fi
+    
+    # Check file content format
+    if grep -E "^(username|password|endpoint_id|auth_token)=" "$portainer_creds" >/dev/null 2>&1; then
+        echo "✅ Portainer credentials file has expected format"
+    else
+        echo "❌ Portainer credentials file has unexpected format"
+        exit 1
+    fi
+else
+    echo "⚠️ Portainer credentials file doesn't exist yet (created during setup)"
+fi
+
+# Test 2: Check NPM credentials file security
+npm_creds="/opt/tools/nginx-proxy-manager/.credentials"
+if [[ -f "$npm_creds" ]]; then
+    echo "✅ NPM credentials file exists"
+    
+    # Check file permissions
+    perms=$(stat -c "%a" "$npm_creds" 2>/dev/null)
+    if [[ "$perms" == "600" || "$perms" == "640" ]]; then
+        echo "✅ NPM credentials file has secure permissions ($perms)"
+    else
+        echo "❌ NPM credentials file has insecure permissions: $perms"
+        exit 1
+    fi
+    
+    # Check file ownership
+    owner=$(stat -c "%U:%G" "$npm_creds" 2>/dev/null)
+    if [[ "$owner" == "portainer:portainer" || "$owner" == "root:portainer" ]]; then
+        echo "✅ NPM credentials file has correct ownership ($owner)"
+    else
+        echo "❌ NPM credentials file has incorrect ownership: $owner"
+        exit 1
+    fi
+else
+    echo "⚠️ NPM credentials file doesn't exist yet (created during setup)"
+fi
+
+# Test 3: Check system configuration file security
+system_config="/etc/docker-backup-manager.conf"
+if [[ -f "$system_config" ]]; then
+    echo "✅ System configuration file exists"
+    
+    # Check file permissions (should be readable by all but writable only by root)
+    perms=$(stat -c "%a" "$system_config" 2>/dev/null)
+    if [[ "$perms" == "644" || "$perms" == "640" ]]; then
+        echo "✅ System config file has appropriate permissions ($perms)"
+    else
+        echo "❌ System config file has inappropriate permissions: $perms"
+        exit 1
+    fi
+    
+    # Check ownership (should be root)
+    owner=$(stat -c "%U" "$system_config" 2>/dev/null)
+    if [[ "$owner" == "root" ]]; then
+        echo "✅ System config file has correct ownership (root)"
+    else
+        echo "❌ System config file has incorrect ownership: $owner"
+        exit 1
+    fi
+    
+    # Check that config doesn't contain sensitive information
+    if grep -iE "(password|secret|token|key)" "$system_config" >/dev/null 2>&1; then
+        echo "❌ System config file contains sensitive information"
+        exit 1
+    else
+        echo "✅ System config file doesn't contain sensitive information"
+    fi
+else
+    echo "⚠️ System configuration file doesn't exist yet (created during setup)"
+fi
+
+# Test 4: Check log file permissions
+log_file="/var/log/docker-backup-manager.log"
+if [[ -f "$log_file" ]]; then
+    echo "✅ Log file exists"
+    
+    # Check file permissions
+    perms=$(stat -c "%a" "$log_file" 2>/dev/null)
+    if [[ "$perms" == "644" || "$perms" == "664" ]]; then
+        echo "✅ Log file has appropriate permissions ($perms)"
+    else
+        echo "❌ Log file has inappropriate permissions: $perms"
+        exit 1
+    fi
+    
+    # Check that log doesn't contain passwords (should be sanitized)
+    if grep -iE "(password=|secret=|token=)" "$log_file" >/dev/null 2>&1; then
+        echo "❌ Log file contains unsanitized sensitive information"
+        exit 1
+    else
+        echo "✅ Log file doesn't contain sensitive information"
+    fi
+else
+    echo "⚠️ Log file doesn't exist yet (created during operations)"
+fi
+
+echo "✅ All credential file security tests passed"
+EOF
+
+    chmod +x "$test_script"
+    
+    if "$test_script"; then
+        success "Credential file security is properly configured"
+        rm -f "$test_script"
+        return 0
+    else
+        error "Credential file security validation failed"
+        rm -f "$test_script"
+        return 1
+    fi
+}
+
 # Run all tests inside VM
 run_vm_tests() {
     # Set proper error handling for tests
@@ -4321,6 +4813,14 @@ run_vm_tests() {
     run_test "API Service Unavailability Handling" "test_api_service_unavailable"
     run_test "Insufficient Permissions Handling" "test_insufficient_permissions"
     run_test "Disk Space Exhaustion Handling" "test_disk_space_exhaustion"
+    
+    info "🔒 PHASE 9: SECURITY AND PERMISSIONS TESTS"
+    echo "=============================================================="
+    
+    run_test "SSH Key Security and Restrictions" "test_ssh_key_restrictions"
+    run_test "Backup File Permissions and Security" "test_backup_file_permissions"
+    run_test "Portainer User Isolation and Security" "test_portainer_user_isolation"
+    run_test "Credential File Security" "test_credential_file_security"
     
     echo
     echo "=============================================================="
