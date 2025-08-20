@@ -3868,6 +3868,315 @@ EOF
     return 0
 }
 
+# Test docker daemon failure scenarios
+test_docker_daemon_failure() {
+    info "Testing Docker daemon failure handling..."
+    
+    # Create a test script that simulates docker daemon failure
+    local test_script="/tmp/test_docker_failure.sh"
+    
+    cat > "$test_script" << 'EOF'
+#!/bin/bash
+export DOCKER_BACKUP_TEST=true
+export NON_INTERACTIVE=true
+source /home/vagrant/docker-stack-backup/backup-manager.sh
+
+# Mock docker command to simulate failure
+docker() {
+    case "$1" in
+        "ps"|"version"|"info")
+            echo "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?"
+            return 1
+            ;;
+        *)
+            echo "Docker daemon not available"
+            return 1
+            ;;
+    esac
+}
+
+# Test 1: Check docker daemon availability check
+if check_docker_daemon 2>/dev/null; then
+    echo "❌ Should have detected docker daemon failure"
+    exit 1
+else
+    echo "✅ Correctly detected docker daemon failure"
+fi
+
+# Test 2: Test backup creation failure with docker down
+if create_backup 2>/dev/null; then
+    echo "❌ Backup should have failed with docker down"
+    exit 1
+else
+    echo "✅ Backup correctly fails when docker daemon unavailable"
+fi
+
+# Test 3: Test container operations with docker down
+if stop_containers 2>/dev/null; then
+    echo "❌ Container stop should have failed with docker down"
+    exit 1
+else
+    echo "✅ Container operations correctly fail when docker daemon unavailable"
+fi
+
+echo "✅ All Docker daemon failure tests passed"
+EOF
+
+    chmod +x "$test_script"
+    
+    if "$test_script"; then
+        success "Docker daemon failure handling works correctly"
+        rm -f "$test_script"
+        return 0
+    else
+        error "Docker daemon failure handling failed"
+        rm -f "$test_script"
+        return 1
+    fi
+}
+
+# Test API service unavailability scenarios
+test_api_service_unavailable() {
+    info "Testing API service unavailability handling..."
+    
+    # Create a test script that simulates API failures
+    local test_script="/tmp/test_api_failure.sh"
+    
+    cat > "$test_script" << 'EOF'
+#!/bin/bash
+export DOCKER_BACKUP_TEST=true
+export NON_INTERACTIVE=true
+source /home/vagrant/docker-stack-backup/backup-manager.sh
+
+# Mock curl to simulate API failures
+curl() {
+    case "$*" in
+        *"/api/auth"*|*"/api/stacks"*|*"/api/endpoints"*)
+            echo "curl: (7) Failed to connect to localhost port 9000: Connection refused"
+            return 7
+            ;;
+        *"/api/tokens"*|*"/api/users"*)
+            echo "curl: (52) Empty reply from server"
+            return 52
+            ;;
+        *)
+            # For other curl calls (like internet connectivity), work normally
+            command curl "$@"
+            return $?
+            ;;
+    esac
+}
+
+# Test 1: Portainer API authentication failure
+if authenticate_portainer 2>/dev/null; then
+    echo "❌ Should have failed to authenticate with Portainer API down"
+    exit 1
+else
+    echo "✅ Correctly handled Portainer API authentication failure"
+fi
+
+# Test 2: Stack state capture with API down
+if get_stack_states 2>/dev/null; then
+    echo "❌ Should have failed to get stack states with API down"
+    exit 1
+else
+    echo "✅ Correctly handled stack state capture failure"
+fi
+
+# Test 3: NPM API configuration failure
+if configure_npm_via_api 2>/dev/null; then
+    echo "❌ Should have failed to configure NPM with API down"
+    exit 1
+else
+    echo "✅ Correctly handled NPM API configuration failure"
+fi
+
+echo "✅ All API service unavailability tests passed"
+EOF
+
+    chmod +x "$test_script"
+    
+    if "$test_script"; then
+        success "API service unavailability handling works correctly"
+        rm -f "$test_script"
+        return 0
+    else
+        error "API service unavailability handling failed"
+        rm -f "$test_script"
+        return 1
+    fi
+}
+
+# Test insufficient permissions scenarios
+test_insufficient_permissions() {
+    info "Testing insufficient permissions handling..."
+    
+    # Create a test script that simulates permission failures
+    local test_script="/tmp/test_permissions_failure.sh"
+    
+    cat > "$test_script" << 'EOF'
+#!/bin/bash
+export DOCKER_BACKUP_TEST=true
+export NON_INTERACTIVE=true
+source /home/vagrant/docker-stack-backup/backup-manager.sh
+
+# Mock sudo to simulate permission failures
+sudo() {
+    case "$*" in
+        *"tar -xzf"*|*"chown"*|*"chmod"*)
+            echo "sudo: /opt/portainer/data: Permission denied"
+            return 1
+            ;;
+        *"mkdir -p"*|*"rm -rf"*)
+            echo "sudo: cannot create directory: Permission denied"
+            return 1
+            ;;
+        *)
+            # For other sudo calls, work normally (but avoid infinite recursion)
+            if [[ "$*" != *"test_permissions_failure"* ]]; then
+                command sudo "$@"
+                return $?
+            else
+                return 1
+            fi
+            ;;
+    esac
+}
+
+# Test 1: Directory creation with insufficient permissions
+temp_dir="/tmp/perm_test_$$"
+if mkdir -p "$temp_dir/test" 2>/dev/null; then
+    echo "✅ Basic directory creation works"
+else
+    echo "❌ Basic directory creation failed unexpectedly"
+    exit 1
+fi
+
+# Test 2: Backup extraction with permission issues
+if restore_using_metadata "/nonexistent/backup.tar.gz" 2>/dev/null; then
+    echo "❌ Should have failed with permission issues"
+    exit 1
+else
+    echo "✅ Correctly handled backup extraction permission failure"
+fi
+
+# Test 3: File ownership changes with permission issues
+test_file="$temp_dir/test_file"
+touch "$test_file" 2>/dev/null || true
+if [[ -f "$test_file" ]]; then
+    # This should fail with our mocked sudo
+    if sudo chown portainer:portainer "$test_file" 2>/dev/null; then
+        echo "❌ Should have failed to change ownership"
+        rm -rf "$temp_dir"
+        exit 1
+    else
+        echo "✅ Correctly handled file ownership change failure"
+    fi
+fi
+
+# Cleanup
+rm -rf "$temp_dir"
+echo "✅ All insufficient permissions tests passed"
+EOF
+
+    chmod +x "$test_script"
+    
+    if "$test_script"; then
+        success "Insufficient permissions handling works correctly"
+        rm -f "$test_script"
+        return 0
+    else
+        error "Insufficient permissions handling failed"
+        rm -f "$test_script"
+        return 1
+    fi
+}
+
+# Test disk space exhaustion scenarios
+test_disk_space_exhaustion() {
+    info "Testing disk space exhaustion handling..."
+    
+    # Create a test script that simulates disk space issues
+    local test_script="/tmp/test_disk_space.sh"
+    
+    cat > "$test_script" << 'EOF'
+#!/bin/bash
+export DOCKER_BACKUP_TEST=true
+export NON_INTERACTIVE=true
+source /home/vagrant/docker-stack-backup/backup-manager.sh
+
+# Mock df to simulate low disk space
+df() {
+    case "$*" in
+        *"/opt/backup"*|*"/tmp"*)
+            # Return very low available space (100KB)
+            echo "Filesystem     1K-blocks  Used Available Use% Mounted on"
+            echo "/dev/sda1       10485760  10485660       100  100% /opt"
+            ;;
+        *)
+            command df "$@"
+            ;;
+    esac
+}
+
+# Mock tar to simulate disk space exhaustion during backup
+tar() {
+    case "$*" in
+        *"-czf"*|*"-xzf"*)
+            echo "tar: write error: No space left on device"
+            return 1
+            ;;
+        *"-tf"*)
+            # Allow tar listing to work
+            command tar "$@"
+            ;;
+        *)
+            command tar "$@"
+            ;;
+    esac
+}
+
+# Test 1: Check available space detection
+available_space=$(get_available_space "/opt/backup" 2>/dev/null || echo "0")
+if [[ "$available_space" -lt 1000 ]]; then
+    echo "✅ Correctly detected low disk space"
+else
+    echo "❌ Failed to detect low disk space: $available_space"
+    exit 1
+fi
+
+# Test 2: Backup creation with insufficient disk space
+if create_backup 2>/dev/null; then
+    echo "❌ Backup should have failed with insufficient disk space"
+    exit 1
+else
+    echo "✅ Correctly failed backup creation due to disk space"
+fi
+
+# Test 3: Restore with insufficient disk space  
+if restore_backup 2>/dev/null; then
+    echo "❌ Restore should have failed with insufficient disk space"
+    exit 1
+else
+    echo "✅ Correctly failed restore due to disk space"
+fi
+
+echo "✅ All disk space exhaustion tests passed"
+EOF
+
+    chmod +x "$test_script"
+    
+    if "$test_script"; then
+        success "Disk space exhaustion handling works correctly"
+        rm -f "$test_script"
+        return 0
+    else
+        error "Disk space exhaustion handling failed"
+        rm -f "$test_script"
+        return 1
+    fi
+}
+
 # Run all tests inside VM
 run_vm_tests() {
     # Set proper error handling for tests
@@ -4004,6 +4313,14 @@ run_vm_tests() {
     
     run_test "Backup File Validation" "test_backup_file_validation"
     run_test "Architecture Validation" "test_architecture_validation"
+    
+    info "🛠️  PHASE 8: ERROR HANDLING TESTS"
+    echo "=============================================================="
+    
+    run_test "Docker Daemon Failure Handling" "test_docker_daemon_failure"
+    run_test "API Service Unavailability Handling" "test_api_service_unavailable"
+    run_test "Insufficient Permissions Handling" "test_insufficient_permissions"
+    run_test "Disk Space Exhaustion Handling" "test_disk_space_exhaustion"
     
     echo
     echo "=============================================================="

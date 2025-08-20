@@ -3215,6 +3215,11 @@ list_backups() {
 
 # Restore from backup
 restore_backup() {
+    # Set up temporary directory for restore operations
+    local temp_restore_dir="/tmp/restore_$$"
+    TEMP_DIR="$temp_restore_dir"
+    mkdir -p "$TEMP_DIR"
+    
     if ! list_backups; then
         return 1
     fi
@@ -3325,6 +3330,9 @@ restore_backup() {
         error "Check the logs and consider restoring from a different backup"
         return 1
     fi
+    
+    # Clean up temporary directory
+    rm -rf "$TEMP_DIR"
     
     success "Restore completed and validated successfully"
     success "Portainer available at: $PORTAINER_URL"
