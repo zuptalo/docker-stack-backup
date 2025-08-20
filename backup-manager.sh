@@ -2621,9 +2621,17 @@ restore_enhanced_stacks() {
                     
                     # Start the stack only if it was running during backup
                     if [[ "$stack_status" == "1" ]]; then
-                        curl -s -X POST "$PORTAINER_API_URL/stacks/$stack_id/start" \
-                            -H "Authorization: Bearer $jwt_token" >/dev/null
-                        success "Restored running stack: $stack_name with enhanced configuration"
+                        local start_response
+                        start_response=$(curl -s -X POST "$PORTAINER_API_URL/stacks/$stack_id/start" \
+                            -H "Authorization: Bearer $jwt_token")
+                        
+                        if echo "$start_response" | grep -q "error\|Error" 2>/dev/null; then
+                            warn "Failed to start stack: $stack_name - API Error: $start_response"
+                        else
+                            # Wait for stack to start up
+                            sleep 3
+                            success "Restored running stack: $stack_name with enhanced configuration"
+                        fi
                     else
                         # Stack was stopped during backup, leave it stopped
                         success "Restored stopped stack: $stack_name (kept in stopped state)"
@@ -2666,9 +2674,15 @@ restore_enhanced_stacks() {
                                 # Stop the newly created stack if it was stopped during backup
                                 local new_stack_id
                                 new_stack_id=$(echo "$create_response" | jq -r '.Id')
-                                curl -s -X POST "$PORTAINER_API_URL/stacks/$new_stack_id/stop" \
-                                    -H "Authorization: Bearer $jwt_token" >/dev/null
-                                success "Successfully recreated stopped stack: $stack_name (kept in stopped state)"
+                                local stop_response
+                                stop_response=$(curl -s -X POST "$PORTAINER_API_URL/stacks/$new_stack_id/stop" \
+                                    -H "Authorization: Bearer $jwt_token")
+                                
+                                if echo "$stop_response" | grep -q "error\|Error" 2>/dev/null; then
+                                    warn "Failed to stop recreated stack: $stack_name - API Error: $stop_response"
+                                else
+                                    success "Successfully recreated stopped stack: $stack_name (kept in stopped state)"
+                                fi
                             fi
                         else
                             error "Failed to recreate stack: $stack_name"
@@ -2704,9 +2718,17 @@ restore_legacy_stacks() {
             stack_id=$(echo "$current_stacks" | jq -r ".[] | select(.Name == \"$stack_name\") | .Id")
             
             if [[ -n "$stack_id" && "$stack_id" != "null" ]]; then
-                curl -s -X POST "$PORTAINER_API_URL/stacks/$stack_id/start" \
-                    -H "Authorization: Bearer $jwt_token" >/dev/null
-                info "Restarted stack: $stack_name"
+                local start_response
+                start_response=$(curl -s -X POST "$PORTAINER_API_URL/stacks/$stack_id/start" \
+                    -H "Authorization: Bearer $jwt_token")
+                
+                if echo "$start_response" | grep -q "error\|Error" 2>/dev/null; then
+                    warn "Failed to start stack: $stack_name - API Error: $start_response"
+                else
+                    # Wait for stack to start up
+                    sleep 3
+                    info "Restarted stack: $stack_name"
+                fi
             fi
         done
     fi

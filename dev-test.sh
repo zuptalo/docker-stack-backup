@@ -885,6 +885,149 @@ test_container_restart() {
     return 0
 }
 
+# Test comprehensive stack restoration after backup
+test_stack_restoration_after_backup() {
+    info "Testing comprehensive stack restoration after backup..."
+    
+    # Ensure we have a clean state first
+    cd /home/vagrant/docker-stack-backup
+    
+    # Deploy a test stack to have something to restore beyond just core services
+    info "Deploying test stack for restoration testing..."
+    
+    # Create a simple test stack
+    local test_stack_compose='version: "3.8"
+services:
+  test-service:
+    image: nginx:alpine
+    container_name: test-restoration-service
+    restart: unless-stopped
+    networks:
+      - prod-network
+      
+networks:
+  prod-network:
+    external: true'
+    
+    # Deploy test stack via Portainer API if available
+    local portainer_url="http://localhost:9000"
+    if curl -s "$portainer_url/api/status" >/dev/null 2>&1; then
+        info "Portainer is available, deploying test stack via API..."
+        
+        # Get JWT token
+        local jwt_token
+        jwt_token=$(curl -s -X POST "$portainer_url/api/auth" \
+            -H "Content-Type: application/json" \
+            -d '{"Username":"admin@localhost","Password":"AdminPassword123!"}' | \
+            jq -r '.jwt' 2>/dev/null)
+        
+        if [[ -n "$jwt_token" && "$jwt_token" != "null" ]]; then
+            # Create test stack
+            curl -s -X POST "$portainer_url/api/stacks?type=2&method=string&endpointId=1" \
+                -H "Authorization: Bearer $jwt_token" \
+                -H "Content-Type: application/json" \
+                -d "{\"Name\":\"test-restoration-stack\",\"StackFileContent\":\"$test_stack_compose\"}" >/dev/null 2>&1
+            
+            # Wait for deployment
+            sleep 5
+            
+            # Verify test stack is running
+            if sudo docker ps | grep -q "test-restoration-service"; then
+                success "Test stack deployed successfully"
+            else
+                warn "Test stack deployment failed, continuing with core services only"
+            fi
+        fi
+    fi
+    
+    # Record initial container states
+    info "Recording initial container states..."
+    local initial_containers
+    initial_containers=$(sudo docker ps --format "{{.Names}}" | sort)
+    
+    # Create backup
+    info "Creating backup to test restoration..."
+    sudo -u portainer DOCKER_BACKUP_TEST=true ./backup-manager.sh backup >/dev/null 2>&1
+    
+    # Verify backup was created
+    local latest_backup
+    latest_backup=$(ls -1t /opt/backup/docker_backup_*.tar.gz 2>/dev/null | head -1)
+    
+    if [[ -z "$latest_backup" ]]; then
+        error "No backup was created"
+        return 1
+    fi
+    
+    success "Backup created: $(basename "$latest_backup")"
+    
+    # Record post-backup container states (should be same as initial)
+    info "Verifying containers are properly restored after backup..."
+    sleep 10  # Give containers time to fully start
+    
+    local post_backup_containers
+    post_backup_containers=$(sudo docker ps --format "{{.Names}}" | sort)
+    
+    # Compare container lists
+    if [[ "$initial_containers" == "$post_backup_containers" ]]; then
+        success "All containers properly restored after backup"
+    else
+        error "Container state mismatch after backup"
+        info "Initial containers:"
+        echo "$initial_containers"
+        info "Post-backup containers:"
+        echo "$post_backup_containers"
+        
+        # Show specific differences
+        info "Missing containers:"
+        comm -23 <(echo "$initial_containers") <(echo "$post_backup_containers")
+        info "Extra containers:"
+        comm -13 <(echo "$initial_containers") <(echo "$post_backup_containers")
+        
+        return 1
+    fi
+    
+    # Verify specific core services are running
+    local required_services=("portainer" "nginx-proxy-manager")
+    for service in "${required_services[@]}"; do
+        if sudo docker ps | grep -q "$service"; then
+            success "✅ $service is running after backup"
+        else
+            error "❌ $service is not running after backup"
+            sudo docker ps --format "table {{.Names}}\t{{.Status}}" | grep "$service" || true
+            return 1
+        fi
+    done
+    
+    # Test API availability after backup (ensures services are actually functional)
+    info "Testing service APIs after backup restoration..."
+    
+    # Test Portainer API
+    if curl -s -f "http://localhost:9000/api/status" >/dev/null 2>&1; then
+        success "✅ Portainer API responding after backup"
+    else
+        error "❌ Portainer API not responding after backup"
+        return 1
+    fi
+    
+    # Test NPM API
+    if curl -s -f "http://localhost:81/api/schema" >/dev/null 2>&1; then
+        success "✅ nginx-proxy-manager API responding after backup"
+    else
+        warn "nginx-proxy-manager API not responding (may be starting up)"
+        # NPM can be slower to start, so this is not a hard failure
+    fi
+    
+    # Clean up test stack if it was created
+    if sudo docker ps | grep -q "test-restoration-service"; then
+        info "Cleaning up test stack..."
+        sudo docker stop test-restoration-service >/dev/null 2>&1 || true
+        sudo docker rm test-restoration-service >/dev/null 2>&1 || true
+    fi
+    
+    success "Stack restoration after backup test completed successfully"
+    return 0
+}
+
 test_backup_listing() {
     # Ensure at least one backup exists first
     if ! ls /opt/backup/docker_backup_*.tar.gz >/dev/null 2>&1; then
@@ -3798,6 +3941,7 @@ run_vm_tests() {
     
     run_test "Backup Creation" "test_backup_creation"
     run_test "Container Restart After Backup" "test_container_restart"
+    run_test "Stack Restoration After Backup" "test_stack_restoration_after_backup"
     run_test "Backup Listing" "test_backup_listing"
     run_test "SSH Key Setup" "test_ssh_key_setup"
     run_test "Log Files" "test_log_files"
