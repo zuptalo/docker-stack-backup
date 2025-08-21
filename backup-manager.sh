@@ -33,8 +33,10 @@ TEST_DOMAIN="zuptalo.local"
 TEST_PORTAINER_SUBDOMAIN="pt"
 TEST_NPM_SUBDOMAIN="npm"
 
-# Configuration file
-CONFIG_FILE="/etc/docker-backup-manager.conf"
+# Configuration file (default location, can be overridden by --config-file flag)
+DEFAULT_CONFIG_FILE="/etc/docker-backup-manager.conf"
+CONFIG_FILE=""
+USER_SPECIFIED_CONFIG_FILE=false
 
 # Colors for output - enable if terminal supports colors
 if [[ "${TERM:-}" == *"color"* ]] || [[ "${TERM:-}" == "xterm"* ]] || [[ "${TERM:-}" == "screen"* ]] || [[ "${TERM:-}" == "tmux"* ]]; then
@@ -565,26 +567,29 @@ prompt_yes_no() {
 
 # Load configuration from file
 load_config() {
-    if [[ -n "$CONFIG_FILE" ]]; then
-        if [[ ! -f "$CONFIG_FILE" ]]; then
-            error "Configuration file not found: $CONFIG_FILE"
-            exit 1
-        fi
-
-        info "Loading configuration from: $CONFIG_FILE"
+    # Determine which config file to use
+    local config_to_load=""
+    
+    if [[ "$USER_SPECIFIED_CONFIG_FILE" == "true" && -n "$CONFIG_FILE" ]]; then
+        # User explicitly specified a config file
+        config_to_load="$CONFIG_FILE"
+    elif [[ -f "$DEFAULT_CONFIG_FILE" ]]; then
+        # Use default config file if it exists
+        config_to_load="$DEFAULT_CONFIG_FILE"
+    fi
+    
+    if [[ -n "$config_to_load" ]]; then
+        info "Loading configuration from: $config_to_load"
 
         # Validate and source the config file safely
-        if ! bash -n "$CONFIG_FILE" 2>/dev/null; then
-            error "Configuration file has syntax errors: $CONFIG_FILE"
+        if ! bash -n "$config_to_load" 2>/dev/null; then
+            error "Configuration file has syntax errors: $config_to_load"
             exit 1
         fi
 
-        source "$CONFIG_FILE"
+        # shellcheck source=/dev/null
+        source "$config_to_load"
         info "Configuration loaded successfully"
-    elif [[ -f "/etc/docker-backup-manager.conf" ]]; then
-        # Load system config if it exists and no explicit config file specified
-        info "Loading system configuration from: /etc/docker-backup-manager.conf"
-        source "/etc/docker-backup-manager.conf"
     fi
     
     # Set defaults based on environment
@@ -5442,10 +5447,12 @@ main() {
                 ;;
             --config-file=*)
                 CONFIG_FILE="${1#*=}"
+                USER_SPECIFIED_CONFIG_FILE=true
                 shift
                 ;;
             --config-file)
                 CONFIG_FILE="$2"
+                USER_SPECIFIED_CONFIG_FILE=true
                 shift 2
                 ;;
             --help|-h)
@@ -5471,8 +5478,8 @@ main() {
         esac
     done
     
-    # Validate config file early if specified
-    if [[ -n "$CONFIG_FILE" ]]; then
+    # Validate config file early if explicitly specified by user
+    if [[ "$USER_SPECIFIED_CONFIG_FILE" == "true" && -n "$CONFIG_FILE" ]]; then
         if [[ ! -f "$CONFIG_FILE" ]]; then
             error "Configuration file not found: $CONFIG_FILE"
             exit 1
