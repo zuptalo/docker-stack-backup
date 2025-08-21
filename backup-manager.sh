@@ -2469,7 +2469,7 @@ stop_containers() {
     
     # Record which containers are currently running (excluding Portainer)
     local running_containers_file="$TEMP_DIR/running_containers.txt"
-    sudo -u "$PORTAINER_USER" docker ps --format "{{.Names}}" | grep -v "^portainer$" > "$running_containers_file"
+    sudo -u "$PORTAINER_USER" docker ps --format "{{.Names}}" | grep -v "^portainer$" > "$running_containers_file" || true
     
     info "Recording running containers for restoration: $(cat "$running_containers_file" | tr '\n' ' ')"
     
@@ -3134,30 +3134,16 @@ restore_using_metadata() {
     if [[ "$permissions_count" -gt 0 ]] && [[ "$permissions_count" != "null" ]]; then
         local restored_count=0
         
-        # Process each permission entry (with a reasonable limit and timeout)
+        # Process each permission entry (with a reasonable limit)
         local max_permissions=500  # Reduced limit for better performance
         local actual_count=$((permissions_count > max_permissions ? max_permissions : permissions_count))
-        
-        # Set a timeout for the permission restoration process (5 minutes max)
-        local start_time=$(date +%s)
-        local timeout_seconds=300
         
         info "Restoring permissions for $actual_count files/directories..."
         
         for ((i=0; i<actual_count; i++)); do
-            # Check timeout every 25 items for more responsive monitoring
-            if [[ $((i % 25)) -eq 0 ]] && [[ $i -gt 0 ]]; then
-                local current_time=$(date +%s)
-                local elapsed=$((current_time - start_time))
-                
-                info "Processed $i/$actual_count permission entries (${elapsed}s elapsed, ${timeout_seconds}s max)"
-                
-                # Break if timeout exceeded
-                if [[ $elapsed -gt $timeout_seconds ]]; then
-                    warn "Permission restoration timeout exceeded (${timeout_seconds}s), stopping to continue with container startup"
-                    warn "Processed $i/$actual_count entries before timeout"
-                    break
-                fi
+            # Progress indicator every 10 items
+            if [[ $((i % 10)) -eq 0 ]] && [[ $i -gt 0 ]]; then
+                info "Processed $i/$actual_count permission entries"
             fi
             
             local path=$(jq -r ".permissions[$i].path // empty" "$metadata_file" 2>/dev/null || echo "")
@@ -3182,13 +3168,11 @@ restore_using_metadata() {
                     sudo chmod "$perms" "/$path" 2>/dev/null || true
                 fi
                 
-                ((restored_count++))
+                restored_count=$((restored_count + 1))
             fi
         done
         
-        local end_time=$(date +%s)
-        local total_elapsed=$((end_time - start_time))
-        success "Restored permissions for $restored_count files/directories in ${total_elapsed}s"
+        success "Restored permissions for $restored_count files/directories"
         
         # If we hit the limit, warn the user
         if [[ $actual_count -lt $permissions_count ]]; then
@@ -5271,6 +5255,12 @@ main() {
     if [[ -n "$CONFIG_FILE" ]]; then
         if [[ ! -f "$CONFIG_FILE" ]]; then
             error "Configuration file not found: $CONFIG_FILE"
+            exit 1
+        fi
+        
+        # Validate syntax early to catch errors before processing
+        if ! bash -n "$CONFIG_FILE" 2>/dev/null; then
+            error "Configuration file has syntax errors: $CONFIG_FILE"
             exit 1
         fi
     fi

@@ -3795,7 +3795,7 @@ MISSING_QUOTE=bad syntax here
 EOF
     
     local syntax_error_output
-    syntax_error_output=$(sudo -u vagrant /home/vagrant/docker-stack-backup/backup-manager.sh --config-file="$bad_config" config --help 2>&1 || true)
+    syntax_error_output=$(sudo -u vagrant /home/vagrant/docker-stack-backup/backup-manager.sh --config-file="$bad_config" backup 2>&1 || true)
     
     if echo "$syntax_error_output" | grep -q "syntax errors"; then
         success "Proper error handling for config file syntax errors"
