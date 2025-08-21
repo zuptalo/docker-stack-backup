@@ -532,38 +532,62 @@ This document tracks the implementation of missing features and improvements ide
   - ✅ Test complete non-interactive workflow with config file
   - ✅ Test help command integration with config file flag
 
-### 🔴 **26. Command-Specific Help and Error Messages**
-- **Status**: ❌ Not Started
+### ✅ **26. Command-Specific Help and Error Messages**
+- **Status**: ✅ Completed (Already Implemented)
 - **Priority**: Medium
 - **Description**: Commands provide generic help instead of context-specific guidance
 - **Requirements**:
-  - Add `--help` flag support for individual commands
-  - Provide command-specific error messages
-  - Include usage examples for complex commands
-  - Add troubleshooting tips for common failures
-- **Impact**: Poor user experience when commands fail
+  - ✅ Add `--help` flag support for individual commands
+  - ✅ Provide command-specific error messages
+  - ✅ Include usage examples for complex commands
+  - ✅ Add troubleshooting tips for common failures
+- **Implementation Details**:
+  - All commands support `--help` flag with detailed command-specific help via `show_command_help()` function
+  - Each command help includes: purpose, description, usage, examples, troubleshooting, and tips
+  - Comprehensive error messages with recovery suggestions throughout the codebase
+  - Context-aware help that shows relevant information for each command
+  - Already tested and working for all commands: setup, backup, restore, schedule, config, generate-nas-script, update, uninstall
+- **Impact**: Enhanced user experience with context-specific guidance for all operations
 
-### 🔴 **27. Dependency Installation Automation**
-- **Status**: ❌ Not Started
+### ✅ **27. Dependency Installation Automation**
+- **Status**: ✅ Completed (Already Implemented)
 - **Priority**: Medium
 - **Description**: Script should automatically install required dependencies during setup
 - **Requirements**:
-  - Auto-install jq, curl, wget during setup
-  - Detect and install missing Docker dependencies
-  - Provide manual installation instructions if auto-install fails
-  - Add dependency validation after installation
-- **Impact**: Reduces setup friction for new users
+  - ✅ Auto-install jq, curl, wget during setup
+  - ✅ Detect and install missing Docker dependencies
+  - ✅ Provide manual installation instructions if auto-install fails
+  - ✅ Add dependency validation after installation
+- **Implementation Details**:
+  - Comprehensive `install_dependencies()` function automatically checks and installs: jq, curl, wget, dnsutils
+  - Dedicated `install_docker()` function handles complete Docker installation with proper repository setup
+  - `install_system_packages()` function provides robust package installation with error handling
+  - Auto-installation in test environment, interactive prompts in production
+  - Post-installation verification for all packages with clear error messages
+  - Manual installation instructions provided if auto-install fails
+  - Called at the beginning of every major command to ensure dependencies are available
+- **Impact**: Zero setup friction - dependencies automatically installed when needed
 
-### 🔴 **28. Better Error Recovery and Rollback**
-- **Status**: ❌ Not Started
+### ✅ **28. Better Error Recovery and Rollback**
+- **Status**: ✅ Completed
 - **Priority**: Medium
 - **Description**: When operations fail, there's no automatic cleanup or rollback mechanism
 - **Requirements**:
-  - Implement transaction-like operations with rollback
-  - Add cleanup mechanism for failed operations
-  - Provide recovery instructions for common failure scenarios
-  - Add validation steps after critical operations
-- **Impact**: Failed operations can leave system in inconsistent state
+  - ✅ Implement transaction-like operations with rollback
+  - ✅ Add cleanup mechanism for failed operations
+  - ✅ Provide recovery instructions for common failure scenarios
+  - ✅ Add validation steps after critical operations
+- **Implementation Details**:
+  - Enhanced `cleanup()` function with comprehensive error recovery and lock file cleanup
+  - Added `create_recovery_info()` function to generate detailed recovery instructions for each operation type
+  - Added `validate_system_state()` function with operation-specific validation checks
+  - Added `create_operation_lock()` function to prevent concurrent operations with stale lock detection
+  - Integrated error recovery into all critical operations: setup, backup, restore
+  - Recovery information includes operation context, timestamps, and specific recovery instructions
+  - System validation checks Docker daemon, service accessibility, directory structure, and data integrity
+  - Operation locks prevent concurrent executions with automatic cleanup on script exit
+  - Comprehensive test coverage with `test_error_recovery_rollback()` function
+- **Impact**: Robust error handling prevents system inconsistencies and provides clear recovery paths
 
 ### 🔴 **29. Improved Progress Feedback**
 - **Status**: ❌ Not Started

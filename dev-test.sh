@@ -3621,6 +3621,112 @@ EOF
     return 0
 }
 
+# Test error recovery and rollback functionality
+test_error_recovery_rollback() {
+    info "Testing error recovery and rollback functionality..."
+    
+    local test_script="/tmp/test_error_recovery.sh"
+    cat > "$test_script" << 'EOF'
+#!/bin/bash
+export DOCKER_BACKUP_TEST=true
+source /home/vagrant/docker-stack-backup/backup-manager.sh
+
+# Test 1: Check if recovery functions exist
+echo "Testing recovery function availability..."
+for func in create_recovery_info validate_system_state create_operation_lock; do
+    if command -v "$func" >/dev/null 2>&1; then
+        echo "✅ $func function is available"
+    else
+        echo "❌ $func function not found"
+        exit 1
+    fi
+done
+
+# Test 2: Test operation lock creation and cleanup
+echo "Testing operation lock mechanism..."
+if create_operation_lock "test_operation" >/dev/null 2>&1; then
+    echo "✅ Operation lock created successfully"
+    
+    # Check if lock file exists
+    if [[ -f "/tmp/backup_manager_test_operation.lock" ]]; then
+        echo "✅ Lock file exists at expected location"
+    else
+        echo "❌ Lock file not found"
+        exit 1
+    fi
+    
+    # Test duplicate lock prevention
+    if ! create_operation_lock "test_operation" >/dev/null 2>&1; then
+        echo "✅ Duplicate lock correctly prevented"
+    else
+        echo "❌ Duplicate lock was not prevented"
+        exit 1
+    fi
+    
+    # Cleanup lock for next test
+    rm -f "/tmp/backup_manager_test_operation.lock"
+else
+    echo "❌ Operation lock creation failed"
+    exit 1
+fi
+
+# Test 3: Test recovery info creation
+echo "Testing recovery info creation..."
+if create_recovery_info "test_operation" >/dev/null 2>&1; then
+    echo "✅ Recovery info created successfully"
+    
+    # Check if recovery file exists and is valid JSON
+    if [[ -n "$RECOVERY_INFO" && -f "$RECOVERY_INFO" ]]; then
+        if jq -e . "$RECOVERY_INFO" >/dev/null 2>&1; then
+            echo "✅ Recovery file is valid JSON"
+            
+            # Check if it contains expected fields
+            if jq -e '.operation' "$RECOVERY_INFO" >/dev/null 2>&1; then
+                echo "✅ Recovery info contains operation field"
+            else
+                echo "❌ Recovery info missing operation field"
+                exit 1
+            fi
+        else
+            echo "❌ Recovery file is not valid JSON"
+            exit 1
+        fi
+    else
+        echo "❌ Recovery file not found"
+        exit 1
+    fi
+else
+    echo "❌ Recovery info creation failed"
+    exit 1
+fi
+
+# Test 4: Test system validation function
+echo "Testing system validation..."
+# Test with dummy operation that should always pass basic checks
+if validate_system_state "unknown_operation" >/dev/null 2>&1; then
+    echo "✅ System validation function works"
+else
+    echo "❌ System validation function failed"
+    exit 1
+fi
+
+echo "✅ All error recovery and rollback tests passed"
+EOF
+    
+    chmod +x "$test_script"
+    
+    if "$test_script" >/dev/null 2>&1; then
+        success "Error recovery and rollback functionality working correctly"
+    else
+        error "Error recovery and rollback functionality failed"
+        rm -f "$test_script"
+        return 1
+    fi
+    
+    rm -f "$test_script"
+    return 0
+}
+
 # Test orphaned stack cleanup functionality
 test_orphaned_stack_cleanup() {
     info "Testing orphaned stack cleanup functionality..."
@@ -5467,6 +5573,7 @@ run_vm_tests() {
     run_test "Restore Backup Selection" "test_restore_backup_selection"
     run_test "Restore with Stack State" "test_restore_with_stack_state"
     run_test "Orphaned Stack Cleanup" "test_orphaned_stack_cleanup"
+    run_test "Error Recovery and Rollback" "test_error_recovery_rollback"
     run_test "Architecture Detection" "test_architecture_detection"
     
     info "🔧 PHASE 6: CUSTOM CONFIGURATION TESTING"

@@ -108,13 +108,164 @@ error() { log "ERROR" "${RED}$*${NC}"; }
 success() { log "SUCCESS" "${GREEN}$*${NC}"; }
 
 # Error handling
+# Enhanced cleanup and error recovery
 cleanup() {
+    local exit_code=$?
+    
+    # Clean up temporary directories
     if [[ -n "${TEMP_DIR:-}" && -d "$TEMP_DIR" ]]; then
         rm -rf "$TEMP_DIR"
+    fi
+    
+    # Clean up any operation lock files
+    if [[ -n "${OPERATION_LOCK:-}" && -f "$OPERATION_LOCK" ]]; then
+        rm -f "$OPERATION_LOCK" 2>/dev/null || true
+    fi
+    
+    # If we're exiting due to an error and recovery info exists, show recovery instructions
+    if [[ $exit_code -ne 0 && -n "${RECOVERY_INFO:-}" && -f "$RECOVERY_INFO" ]]; then
+        echo
+        warn "Operation failed - recovery information available:"
+        warn "Recovery file: $RECOVERY_INFO"
+        warn "To view recovery instructions: cat '$RECOVERY_INFO'"
     fi
 }
 
 trap cleanup EXIT
+
+# Create recovery information for critical operations
+create_recovery_info() {
+    local operation="$1"
+    local recovery_file="/tmp/backup_manager_recovery_$(date +%Y%m%d_%H%M%S).json"
+    RECOVERY_INFO="$recovery_file"
+    
+    local current_state=""
+    case "$operation" in
+        "backup")
+            current_state="backup_creation"
+            ;;
+        "restore")
+            current_state="system_restore"
+            ;;
+        "setup")
+            current_state="initial_setup"
+            ;;
+        "migration")
+            current_state="path_migration"
+            ;;
+        *)
+            current_state="unknown_operation"
+            ;;
+    esac
+    
+    jq -n \
+        --arg op "$operation" \
+        --arg state "$current_state" \
+        --arg timestamp "$(date -Iseconds)" \
+        --arg user "$(whoami)" \
+        --arg working_dir "$(pwd)" \
+        '{
+            operation: $op,
+            state: $state,
+            timestamp: $timestamp,
+            user: $user,
+            working_directory: $working_dir,
+            recovery_instructions: {
+                backup_creation: "If backup creation failed, check disk space and try again. Previous backups are preserved.",
+                system_restore: "If restore failed, system may be in inconsistent state. Check logs and restore from last known good backup.",
+                initial_setup: "If setup failed, run uninstall command and restart setup. Check prerequisites and network connectivity.",
+                path_migration: "If migration failed, restore from pre-migration backup using restore command with the backup file listed above.",
+                unknown_operation: "Check logs for specific error messages and recovery steps."
+            }
+        }' > "$recovery_file" 2>/dev/null || true
+    
+    return 0
+}
+
+# Validate critical system state after operations
+validate_system_state() {
+    local operation="$1"
+    local validation_errors=()
+    
+    case "$operation" in
+        "setup")
+            # Validate Docker is running
+            if ! systemctl is-active docker >/dev/null 2>&1; then
+                validation_errors+=("Docker daemon is not running")
+            fi
+            
+            # Validate Portainer is accessible
+            if ! curl -s -f "http://localhost:9000" >/dev/null 2>&1; then
+                validation_errors+=("Portainer is not accessible on port 9000")
+            fi
+            
+            # Validate required directories exist
+            for dir in "$PORTAINER_PATH" "$TOOLS_PATH" "$BACKUP_PATH"; do
+                if [[ -n "$dir" && ! -d "$dir" ]]; then
+                    validation_errors+=("Required directory does not exist: $dir")
+                fi
+            done
+            ;;
+        "backup")
+            # Validate backup file was created
+            if [[ -n "${LATEST_BACKUP:-}" && ! -f "$LATEST_BACKUP" ]]; then
+                validation_errors+=("Backup file was not created: $LATEST_BACKUP")
+            fi
+            
+            # Validate services are running after backup
+            if ! curl -s -f "http://localhost:9000" >/dev/null 2>&1; then
+                validation_errors+=("Portainer is not accessible after backup")
+            fi
+            ;;
+        "restore")
+            # Validate services are running after restore
+            if ! curl -s -f "http://localhost:9000" >/dev/null 2>&1; then
+                validation_errors+=("Portainer is not accessible after restore")
+            fi
+            
+            # Validate data directories exist
+            for dir in "$PORTAINER_PATH" "$TOOLS_PATH"; do
+                if [[ -n "$dir" && ! -d "$dir" ]]; then
+                    validation_errors+=("Required directory missing after restore: $dir")
+                fi
+            done
+            ;;
+    esac
+    
+    # Report validation results
+    if [[ ${#validation_errors[@]} -eq 0 ]]; then
+        success "System validation passed for $operation"
+        return 0
+    else
+        error "System validation failed for $operation:"
+        for error in "${validation_errors[@]}"; do
+            error "  - $error"
+        done
+        return 1
+    fi
+}
+
+# Create operation lock to prevent concurrent operations
+create_operation_lock() {
+    local operation="$1"
+    local lock_file="/tmp/backup_manager_${operation}.lock"
+    
+    if [[ -f "$lock_file" ]]; then
+        local lock_pid=$(cat "$lock_file" 2>/dev/null)
+        if [[ -n "$lock_pid" ]] && kill -0 "$lock_pid" 2>/dev/null; then
+            error "Another $operation operation is already running (PID: $lock_pid)"
+            error "If this is incorrect, remove the lock file: rm '$lock_file'"
+            return 1
+        else
+            warn "Removing stale lock file: $lock_file"
+            rm -f "$lock_file"
+        fi
+    fi
+    
+    echo "$$" > "$lock_file"
+    OPERATION_LOCK="$lock_file"
+    return 0
+}
 
 die() {
     error "$*"
@@ -3002,6 +3153,10 @@ cleanup_orphaned_stacks() {
 create_backup() {
     info "Starting backup process..."
     
+    # Create operation lock and recovery info
+    create_operation_lock "backup" || return 1
+    create_recovery_info "backup"
+    
     local timestamp=$(date '+%Y%m%d_%H%M%S')
     local backup_name="docker_backup_${timestamp}"
     local temp_backup_dir="/tmp/${backup_name}"
@@ -3099,6 +3254,17 @@ create_backup() {
     if [[ -f "$final_backup_file" ]]; then
         success "Backup created: $final_backup_file"
         info "Backup size: $(du -h "$final_backup_file" | cut -f1)"
+        
+        # Store backup file path for validation
+        LATEST_BACKUP="$final_backup_file"
+        
+        # Validate system state after backup
+        if validate_system_state "backup"; then
+            success "Backup completed successfully with validation"
+        else
+            warn "Backup completed but system validation failed"
+            warn "Check system status and recovery information if needed"
+        fi
     else
         error "Backup creation failed"
         return 1
@@ -3262,6 +3428,10 @@ list_backups() {
 
 # Restore from backup
 restore_backup() {
+    # Create operation lock and recovery info
+    create_operation_lock "restore" || return 1
+    create_recovery_info "restore"
+    
     # Set up temporary directory for restore operations
     local temp_restore_dir="/tmp/restore_$$"
     TEMP_DIR="$temp_restore_dir"
@@ -3416,9 +3586,17 @@ restore_backup() {
     # Clean up temporary directory
     rm -rf "$TEMP_DIR"
     
-    success "Restore completed and validated successfully"
-    success "Portainer available at: $PORTAINER_URL"
-    info "Note: Services may take a few minutes to fully initialize"
+    # Validate system state after restore
+    if validate_system_state "restore"; then
+        success "Restore completed and validated successfully"
+        success "Portainer available at: $PORTAINER_URL"
+        info "Note: Services may take a few minutes to fully initialize"
+    else
+        error "Restore completed but system validation failed"
+        error "System may be in an inconsistent state"
+        error "Check recovery information and logs for troubleshooting"
+        return 1
+    fi
 }
 
 # Validate cron expression format
@@ -5330,6 +5508,10 @@ main() {
                 show_command_help "setup"
                 exit 0
             fi
+            # Create operation lock and recovery info
+            create_operation_lock "setup" || exit 1
+            create_recovery_info "setup"
+            
             # Setup doesn't need to load config - it creates it
             install_dependencies
             setup_fixed_configuration
@@ -5353,9 +5535,17 @@ main() {
                 warn "SSH key validation failed - NAS backup functionality may not work properly"
             fi
             
-            success "Setup completed successfully!"
-            echo
-            printf "%b\n" "${BLUE}🎉 Docker Stack Backup Manager is Ready!${NC}"
+            # Validate system state after setup
+            if validate_system_state "setup"; then
+                success "Setup completed successfully!"
+                echo
+                printf "%b\n" "${BLUE}🎉 Docker Stack Backup Manager is Ready!${NC}"
+            else
+                error "Setup completed but system validation failed"
+                error "Some components may not be working correctly"
+                error "Check recovery information and logs for troubleshooting"
+                exit 1
+            fi
             echo "═══════════════════════════════════════════════════════════════"
             echo
             printf "%b\n" "${BLUE}📱 Service Access URLs:${NC}"
