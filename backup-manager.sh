@@ -3275,6 +3275,158 @@ implement_snapshot_restore() {
     fi
 }
 
+# Implement true snapshot restore: clean system and restore only backup contents
+implement_true_snapshot_restore() {
+    local selected_backup="$1"
+    
+    info "Implementing true snapshot restore - cleaning system and restoring only backup contents..."
+    
+    # Step 1: Stop and remove ALL containers (except Portainer which we need for API calls)
+    info "Stopping and removing all containers (except Portainer)..."
+    stop_and_remove_all_containers
+    
+    # Step 2: Start only Portainer to have API access
+    info "Starting Portainer for API management..."
+    start_portainer_only
+    
+    # Step 3: Wait for Portainer to be ready
+    info "Waiting for Portainer to be ready..."
+    wait_for_portainer_ready
+    
+    # Step 4: Extract and process stack states from backup
+    local stack_state_file="/tmp/stack_states.json"
+    if tar -tf "$selected_backup" | grep -q "stack_states.json"; then
+        sudo tar -xzf "$selected_backup" -C /tmp stack_states.json 2>/dev/null || true
+        if [[ -f "$stack_state_file" ]]; then
+            info "Restoring stacks from backup using Portainer API..."
+            restore_stacks_from_backup "$stack_state_file"
+            sudo rm -f "$stack_state_file"
+        else
+            warn "No stack state file found in backup - only Portainer will be running"
+        fi
+    else
+        warn "Backup does not contain stack states - only Portainer will be running"
+    fi
+    
+    # Step 5: Final Portainer restart to ensure clean state
+    info "Performing final Portainer restart for clean state..."
+    restart_portainer_after_restore
+}
+
+# Stop and remove all containers except Portainer
+stop_and_remove_all_containers() {
+    info "Getting list of all running containers..."
+    local all_containers
+    all_containers=$(sudo -u "$PORTAINER_USER" docker ps --format "{{.Names}}" | grep -v "^portainer$" || true)
+    
+    if [[ -n "$all_containers" ]]; then
+        info "Stopping containers: $(echo "$all_containers" | tr '\n' ' ')"
+        echo "$all_containers" | while read -r container_name; do
+            if [[ -n "$container_name" ]]; then
+                info "Stopping container: $container_name"
+                sudo -u "$PORTAINER_USER" docker stop "$container_name" || warn "Failed to stop $container_name"
+            fi
+        done
+        
+        info "Removing stopped containers..."
+        echo "$all_containers" | while read -r container_name; do
+            if [[ -n "$container_name" ]]; then
+                info "Removing container: $container_name"
+                sudo -u "$PORTAINER_USER" docker rm "$container_name" || warn "Failed to remove $container_name"
+            fi
+        done
+    else
+        info "No containers found to stop/remove (other than Portainer)"
+    fi
+    
+    # Also remove any orphaned containers
+    info "Cleaning up any orphaned containers..."
+    sudo -u "$PORTAINER_USER" docker container prune -f || true
+}
+
+# Start only Portainer container
+start_portainer_only() {
+    info "Starting Portainer container..."
+    cd "$PORTAINER_PATH" || {
+        error "Could not navigate to Portainer directory: $PORTAINER_PATH"
+        return 1
+    }
+    
+    # Start Portainer using docker compose
+    if ! sudo -u "$PORTAINER_USER" docker compose up -d; then
+        error "Failed to start Portainer"
+        return 1
+    fi
+    
+    success "Portainer started successfully"
+}
+
+# Wait for Portainer to be ready and accessible
+wait_for_portainer_ready() {
+    local max_wait=60
+    local wait_count=0
+    
+    while [[ $wait_count -lt $max_wait ]]; do
+        if curl -s "http://localhost:9000" >/dev/null 2>&1; then
+            success "Portainer is ready and accessible"
+            sleep 5  # Give it a bit more time for full initialization
+            return 0
+        fi
+        
+        sleep 2
+        wait_count=$((wait_count + 2))
+        
+        if [[ $((wait_count % 10)) -eq 0 ]]; then
+            info "Still waiting for Portainer... ($wait_count/${max_wait}s)"
+        fi
+    done
+    
+    error "Portainer failed to become ready within ${max_wait} seconds"
+    return 1
+}
+
+# Restore stacks from backup using Portainer API (only what's in backup)
+restore_stacks_from_backup() {
+    local stack_state_file="$1"
+    
+    if [[ ! -f "$stack_state_file" ]]; then
+        warn "Stack state file not found: $stack_state_file"
+        return 0
+    fi
+    
+    source "$PORTAINER_PATH/.credentials"
+    
+    # Login to Portainer API
+    local auth_response
+    auth_response=$(curl -s -X POST "$PORTAINER_API_URL/auth" \
+        -H "Content-Type: application/json" \
+        -d "{\"Username\": \"$PORTAINER_ADMIN_USERNAME\", \"Password\": \"$PORTAINER_ADMIN_PASSWORD\"}")
+    
+    local jwt_token
+    jwt_token=$(echo "$auth_response" | jq -r '.jwt // empty')
+    
+    if [[ -z "$jwt_token" ]]; then
+        error "Failed to authenticate with Portainer API"
+        return 1
+    fi
+    
+    # Get stacks from backup and restore them
+    local backup_stack_names
+    backup_stack_names=$(jq -r '.stacks[].name' "$stack_state_file" 2>/dev/null)
+    
+    if [[ -z "$backup_stack_names" ]]; then
+        info "No stacks found in backup to restore"
+        return 0
+    fi
+    
+    info "Restoring stacks from backup: $(echo "$backup_stack_names" | tr '\n' ' ')"
+    
+    # Use the existing restart_stacks function but ensure we start fresh
+    restart_stacks "$stack_state_file"
+    
+    success "Stack restoration from backup completed"
+}
+
 # Restart Portainer after restore operations to ensure clean state consistency
 restart_portainer_after_restore() {
     info "Restarting Portainer to ensure clean state consistency after restore..."
@@ -3294,18 +3446,18 @@ restart_portainer_after_restore() {
         return 1
     }
     
-    # Restart Portainer using docker-compose
+    # Restart Portainer using docker compose
     if [[ "$portainer_running" == "true" ]]; then
         info "Restarting Portainer container..."
-        if ! sudo -u "$PORTAINER_USER" docker-compose restart; then
-            warn "Docker-compose restart failed, trying stop/start sequence"
-            sudo -u "$PORTAINER_USER" docker-compose stop
+        if ! sudo -u "$PORTAINER_USER" docker compose restart; then
+            warn "Docker compose restart failed, trying stop/start sequence"
+            sudo -u "$PORTAINER_USER" docker compose stop
             sleep 5
-            sudo -u "$PORTAINER_USER" docker-compose up -d
+            sudo -u "$PORTAINER_USER" docker compose up -d
         fi
     else
         info "Starting Portainer container..."
-        sudo -u "$PORTAINER_USER" docker-compose up -d
+        sudo -u "$PORTAINER_USER" docker compose up -d
     fi
     
     # Wait for Portainer to be ready
@@ -3696,56 +3848,8 @@ restore_backup() {
         fi
     fi
     
-    # Start containers
-    start_containers
-    
-    # Wait for Portainer to be ready
-    info "Waiting for Portainer to be ready..."
-    sleep 30
-    
-    # Restore stack states
-    local stack_state_file="/tmp/stack_states.json"
-    if tar -tf "$selected_backup" | grep -q "stack_states.json"; then
-        sudo tar -xzf "$selected_backup" -C /tmp stack_states.json 2>/dev/null || true
-        if [[ -f "$stack_state_file" ]]; then
-            # Implement snapshot restore philosophy - remove stacks not in backup
-            implement_snapshot_restore "$stack_state_file"
-            restart_stacks "$stack_state_file"
-            sudo rm -f "$stack_state_file"
-        fi
-    fi
-    
-    # Ensure all previously running containers are restarted
-    info "Ensuring all containers are properly restarted..."
-    local running_containers_file="$TEMP_DIR/running_containers.txt"
-    if [[ -f "$running_containers_file" ]]; then
-        while read -r container_name; do
-            if [[ -n "$container_name" ]] && [[ "$container_name" != "portainer" ]]; then
-                # Check if container exists and start it if not running
-                if sudo -u "$PORTAINER_USER" docker ps -a --format "{{.Names}}" | grep -q "^${container_name}$"; then
-                    if ! sudo -u "$PORTAINER_USER" docker ps --format "{{.Names}}" | grep -q "^${container_name}$"; then
-                        info "Starting container: $container_name"
-                        sudo -u "$PORTAINER_USER" docker start "$container_name" || warn "Failed to start container: $container_name"
-                    else
-                        info "Container already running: $container_name"
-                    fi
-                else
-                    warn "Container no longer exists: $container_name"
-                fi
-            fi
-        done < "$running_containers_file"
-    else
-        warn "No running containers file found, attempting to start common containers"
-        # Try to start common containers that might have been stopped
-        for container in nginx-proxy-manager gitea vaultwarden; do
-            if sudo -u "$PORTAINER_USER" docker ps -a --format "{{.Names}}" | grep -q "^${container}$"; then
-                if ! sudo -u "$PORTAINER_USER" docker ps --format "{{.Names}}" | grep -q "^${container}$"; then
-                    info "Starting container: $container"
-                    sudo -u "$PORTAINER_USER" docker start "$container" || warn "Failed to start container: $container"
-                fi
-            fi
-        done
-    fi
+    # Implement true snapshot restore: clean system and restore only what's in backup
+    implement_true_snapshot_restore "$selected_backup"
     
     # Validate restore success
     info "Validating restore completion..."

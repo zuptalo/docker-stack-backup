@@ -3631,46 +3631,38 @@ test_snapshot_restore_remove_extra_stacks() {
 export DOCKER_BACKUP_TEST=true
 source /home/vagrant/docker-stack-backup/backup-manager.sh
 
-# Test the implement_snapshot_restore function
-test_implement_snapshot_restore() {
-    # Create a mock stack state file with 2 stacks
-    local test_stack_file="/tmp/test_stack_states.json"
-    cat > "$test_stack_file" << 'JSON_EOF'
-{
-    "capture_version": "enhanced-v2",
-    "timestamp": "2025-01-01T00:00:00Z",
-    "stacks": [
-        {
-            "id": 1,
-            "name": "nginx-proxy-manager",
-            "status": 1
-        },
-        {
-            "id": 2,
-            "name": "test-stack-1",
-            "status": 1
-        }
-    ]
-}
-JSON_EOF
-
-    # Test that the function exists and can be called
-    if command -v implement_snapshot_restore >/dev/null 2>&1; then
-        echo "✅ implement_snapshot_restore function exists"
-        
-        # Test with mock stack state file
-        if implement_snapshot_restore "$test_stack_file" >/dev/null 2>&1; then
-            echo "✅ implement_snapshot_restore function runs without errors"
-        else
-            echo "⚠️  implement_snapshot_restore function encountered issues (expected in test env)"
-        fi
+# Test the implement_true_snapshot_restore function
+test_implement_true_snapshot_restore() {
+    # Test that the new true snapshot restore function exists
+    if command -v implement_true_snapshot_restore >/dev/null 2>&1; then
+        echo "✅ implement_true_snapshot_restore function exists"
     else
-        echo "❌ implement_snapshot_restore function not found"
-        rm -f "$test_stack_file"
+        echo "❌ implement_true_snapshot_restore function not found"
         exit 1
     fi
     
-    rm -f "$test_stack_file"
+    # Test helper functions exist
+    if command -v stop_and_remove_all_containers >/dev/null 2>&1; then
+        echo "✅ stop_and_remove_all_containers function exists"
+    else
+        echo "❌ stop_and_remove_all_containers function not found"
+        exit 1
+    fi
+    
+    if command -v start_portainer_only >/dev/null 2>&1; then
+        echo "✅ start_portainer_only function exists"  
+    else
+        echo "❌ start_portainer_only function not found"
+        exit 1
+    fi
+    
+    if command -v restore_stacks_from_backup >/dev/null 2>&1; then
+        echo "✅ restore_stacks_from_backup function exists"
+    else
+        echo "❌ restore_stacks_from_backup function not found"
+        exit 1
+    fi
+    
     return 0
 }
 
@@ -3689,10 +3681,10 @@ test_stack_comparison_logic() {
     return 0
 }
 
-echo "Testing snapshot restore - remove extra stacks functionality..."
-test_implement_snapshot_restore
+echo "Testing true snapshot restore functionality..."
+test_implement_true_snapshot_restore
 test_stack_comparison_logic
-echo "✅ All snapshot restore remove tests passed"
+echo "✅ All true snapshot restore tests passed"
 EOF
     
     chmod +x "$test_script"
@@ -3848,10 +3840,23 @@ test_restart_integration() {
     return 0
 }
 
+# Test that docker compose (not docker-compose) is used
+test_docker_compose_command() {
+    # Check that the script uses 'docker compose' not 'docker-compose'
+    if grep -q "docker compose restart" "/home/vagrant/docker-stack-backup/backup-manager.sh"; then
+        echo "✅ Uses correct 'docker compose' command"
+    else
+        echo "❌ Still using old 'docker-compose' command"
+        exit 1
+    fi
+    return 0
+}
+
 echo "Testing Portainer restart functionality..."
 test_restart_function_exists
 test_restart_function_logic
 test_restart_integration
+test_docker_compose_command
 echo "✅ All Portainer restart tests passed"
 EOF
     
