@@ -4791,6 +4791,122 @@ EOF
 }
 
 # Test multi-stack backup scenario
+test_backup_restore_enhancements() {
+    info "Testing backup/restore enhancements and fixes..."
+    
+    # Test 1: Verify pre-restore backup ownership is correct
+    info "Test 1: Pre-restore backup ownership fix..."
+    
+    # Create a backup first
+    sudo -u portainer DOCKER_BACKUP_TEST=true /home/vagrant/docker-stack-backup/backup-manager.sh backup >/dev/null 2>&1
+    
+    # Find the latest backup
+    local latest_backup
+    latest_backup=$(ls -1t /opt/backup/docker_backup_*.tar.gz 2>/dev/null | head -1)
+    
+    if [[ -z "$latest_backup" ]]; then
+        error "No backup found for restoration test"
+        return 1
+    fi
+    
+    # Count backups before restore
+    local backup_count_before
+    backup_count_before=$(ls -1 /opt/backup/docker_backup_*.tar.gz 2>/dev/null | wc -l)
+    
+    # Perform a restore (which creates pre-restore backup)
+    info "Creating pre-restore backup during restore operation..."
+    echo "2" | sudo -u portainer DOCKER_BACKUP_TEST=true /home/vagrant/docker-stack-backup/backup-manager.sh restore >/dev/null 2>&1 || true
+    
+    # Find the pre-restore backup
+    local pre_restore_backup
+    pre_restore_backup=$(ls -1t /opt/backup/pre_restore_*.tar.gz 2>/dev/null | head -1)
+    
+    if [[ -n "$pre_restore_backup" ]]; then
+        # Check ownership of pre-restore backup
+        local owner
+        owner=$(stat -c "%U" "$pre_restore_backup" 2>/dev/null || echo "unknown")
+        
+        if [[ "$owner" == "portainer" ]]; then
+            success "Pre-restore backup has correct ownership (portainer)"
+        else
+            error "Pre-restore backup has wrong ownership: $owner (should be portainer)"
+            return 1
+        fi
+    else
+        warn "No pre-restore backup found (may be expected behavior)"
+    fi
+    
+    # Test 2: Verify clean backup creation (only active stacks)
+    info "Test 2: Clean backup creation (only active stacks)..."
+    
+    # Create a test directory that simulates old removed stack
+    local old_stack_dir="/opt/tools/old-removed-stack"
+    sudo mkdir -p "$old_stack_dir"
+    sudo chown portainer:portainer "$old_stack_dir"
+    echo "old stack data" | sudo tee "$old_stack_dir/data.txt" >/dev/null
+    
+    # Create backup
+    sudo -u portainer DOCKER_BACKUP_TEST=true /home/vagrant/docker-stack-backup/backup-manager.sh backup >/dev/null 2>&1
+    
+    # Get the latest backup after our test
+    local clean_backup
+    clean_backup=$(ls -1t /opt/backup/docker_backup_*.tar.gz 2>/dev/null | head -1)
+    
+    if [[ -n "$clean_backup" ]]; then
+        # Check if the old removed stack is NOT in the backup
+        if tar -tf "$clean_backup" | grep -q "old-removed-stack"; then
+            error "Backup includes inactive stack directories (not clean)"
+            return 1
+        else
+            success "Clean backup: inactive stack directories excluded"
+        fi
+    else
+        error "No clean backup found"
+        return 1
+    fi
+    
+    # Clean up test directory
+    sudo rm -rf "$old_stack_dir"
+    
+    # Test 3: Verify container auto-start after restoration
+    info "Test 3: Container auto-start after restoration..."
+    
+    # Record containers before restore
+    local containers_before
+    containers_before=$(sudo docker ps --format "{{.Names}}" | sort | tr '\n' ' ')
+    
+    # Stop a container that should be restarted
+    if sudo docker ps | grep -q "nginx-proxy-manager"; then
+        sudo docker stop nginx-proxy-manager >/dev/null 2>&1
+        sleep 2
+        
+        # Verify it's stopped
+        if ! sudo docker ps | grep -q "nginx-proxy-manager"; then
+            info "nginx-proxy-manager stopped for restoration test"
+            
+            # Perform restore to restart it
+            echo "2" | sudo -u portainer DOCKER_BACKUP_TEST=true /home/vagrant/docker-stack-backup/backup-manager.sh restore >/dev/null 2>&1 || true
+            
+            # Wait for restoration to complete
+            sleep 15
+            
+            # Check if nginx-proxy-manager is running again
+            if sudo docker ps | grep -q "nginx-proxy-manager"; then
+                success "Container auto-started after restoration"
+            else
+                error "Container not auto-started after restoration"
+                return 1
+            fi
+        else
+            warn "Could not stop nginx-proxy-manager for test"
+        fi
+    else
+        warn "nginx-proxy-manager not found for auto-start test"
+    fi
+    
+    success "All backup/restore enhancement tests passed"
+}
+
 test_multi_stack_backup_scenario() {
     info "Testing multi-stack backup scenario..."
     
@@ -5312,6 +5428,7 @@ run_vm_tests() {
     echo "=============================================================="
     
     run_test "Full Backup and Restore Cycle" "test_full_backup_restore_cycle"
+    run_test "Backup/Restore Enhancements" "test_backup_restore_enhancements"
     run_test "Multi-Stack Backup Scenario" "test_multi_stack_backup_scenario"
     run_test "Retention Policy Enforcement" "test_retention_policy_enforcement"
     run_test "Cron Job Execution" "test_cron_job_execution"
