@@ -422,7 +422,7 @@ check_setup_required() {
     local missing_requirements=()
     
     # Check if configuration file exists
-    if [[ ! -f "$CONFIG_FILE" ]]; then
+    if [[ ! -f "$DEFAULT_CONFIG_FILE" ]]; then
         missing_requirements+=("Configuration file missing")
     fi
     
@@ -620,7 +620,9 @@ load_config() {
 
 # Save configuration
 save_config() {
-    sudo tee "$CONFIG_FILE" > /dev/null << EOF
+    # Use default config file location for saving during setup
+    local config_file_to_save="${CONFIG_FILE:-$DEFAULT_CONFIG_FILE}"
+    sudo tee "$config_file_to_save" > /dev/null << EOF
 # Docker Backup Manager Configuration
 PORTAINER_PATH="$PORTAINER_PATH"
 TOOLS_PATH="$TOOLS_PATH"
@@ -634,7 +636,7 @@ PORTAINER_USER="$PORTAINER_USER"
 PORTAINER_URL="$PORTAINER_URL"
 NPM_URL="$NPM_URL"
 EOF
-    success "Configuration saved to $CONFIG_FILE"
+    success "Configuration saved to $config_file_to_save"
 }
 
 # Simple fixed configuration - no customization needed
