@@ -2776,60 +2776,18 @@ restore_enhanced_stacks() {
                         success "Restored stopped stack: $stack_name (kept in stopped state)"
                     fi
                 else
-                    warn "Stack not found in current Portainer installation: $stack_name"
+                    info "Stack not found in current Portainer installation: $stack_name (skipping - deleted stacks are not recreated during restore)"
                     
-                    # Optionally recreate the stack if compose content is available
-                    if [[ -n "$compose_content" && "$compose_content" != "null" && "$compose_content" != "" ]]; then
-                        info "Attempting to recreate missing stack: $stack_name"
-                        
-                        # Get endpoint ID (usually 1 for local Docker)
-                        local endpoint_id=1
-                        
-                        # Prepare stack creation payload
-                        local create_payload
-                        create_payload=$(jq -n \
-                            --arg name "$stack_name" \
-                            --arg compose "$compose_content" \
-                            --argjson env "$env_vars" \
-                            --argjson endpoint_id "$endpoint_id" \
-                            '{
-                                name: $name,
-                                stackFileContent: $compose,
-                                env: $env,
-                                fromAppTemplate: false
-                            }')
-                        
-                        # Create the stack
-                        local create_response
-                        create_response=$(curl -s -X POST "$PORTAINER_API_URL/stacks?type=2&method=string&endpointId=$endpoint_id" \
-                            -H "Authorization: Bearer $jwt_token" \
-                            -H "Content-Type: application/json" \
-                            -d "$create_payload")
-                        
-                        if echo "$create_response" | jq -e '.Id' >/dev/null 2>&1; then
-                            if [[ "$stack_status" == "1" ]]; then
-                                success "Successfully recreated running stack: $stack_name"
-                            else
-                                # Stop the newly created stack if it was stopped during backup
-                                local new_stack_id
-                                new_stack_id=$(echo "$create_response" | jq -r '.Id')
-                                local stop_response
-                                stop_response=$(curl -s -X POST "$PORTAINER_API_URL/stacks/$new_stack_id/stop" \
-                                    -H "Authorization: Bearer $jwt_token")
-                                
-                                if echo "$stop_response" | grep -q "error\|Error" 2>/dev/null; then
-                                    warn "Failed to stop recreated stack: $stack_name - API Error: $stop_response"
-                                else
-                                    success "Successfully recreated stopped stack: $stack_name (kept in stopped state)"
-                                fi
-                            fi
-                        else
-                            error "Failed to recreate stack: $stack_name"
-                            warn "Create response: $create_response"
-                        fi
+                    # Clean up any orphaned stack directory that may have been restored
+                    if [[ -d "$TOOLS_PATH/$stack_name" ]]; then
+                        warn "Removing orphaned stack directory: $TOOLS_PATH/$stack_name"
+                        sudo rm -rf "$TOOLS_PATH/$stack_name"
                     fi
                 fi
         done
+        
+        # Clean up any orphaned stack directories after restore
+        cleanup_orphaned_stacks "$jwt_token"
         
         success "Enhanced stack restoration completed"
     fi
@@ -2870,6 +2828,9 @@ restore_legacy_stacks() {
                 fi
             fi
         done
+        
+        # Clean up any orphaned stack directories after legacy restore
+        cleanup_orphaned_stacks "$jwt_token"
     fi
 }
 
@@ -2979,6 +2940,62 @@ EOF
     else
         warn "Backup metadata may be malformed, continuing with backup"
     fi
+}
+
+# Clean up orphaned stack directories that don't exist in Portainer
+cleanup_orphaned_stacks() {
+    local jwt_token="$1"
+    
+    if [[ -z "$jwt_token" ]]; then
+        warn "No JWT token provided, skipping orphaned stack cleanup"
+        return 0
+    fi
+    
+    info "Cleaning up orphaned stack directories..."
+    
+    # Get current active stacks from Portainer
+    local current_stacks
+    current_stacks=$(curl -s -H "Authorization: Bearer $jwt_token" "$PORTAINER_API_URL/stacks")
+    
+    if [[ -z "$current_stacks" ]] || ! echo "$current_stacks" | jq -e . >/dev/null 2>&1; then
+        warn "Could not retrieve current stacks from Portainer API, skipping cleanup"
+        return 0
+    fi
+    
+    # Get list of active stack names
+    local active_stack_names
+    active_stack_names=$(echo "$current_stacks" | jq -r '.[].Name' 2>/dev/null || echo "")
+    
+    # Check each directory in TOOLS_PATH
+    if [[ -d "$TOOLS_PATH" ]]; then
+        for stack_dir in "$TOOLS_PATH"/*/; do
+            if [[ -d "$stack_dir" ]]; then
+                local dir_name
+                dir_name=$(basename "$stack_dir")
+                
+                # Check if this directory corresponds to an active stack
+                local is_active=false
+                if [[ -n "$active_stack_names" ]]; then
+                    while read -r active_name; do
+                        if [[ "$dir_name" == "$active_name" ]]; then
+                            is_active=true
+                            break
+                        fi
+                    done <<< "$active_stack_names"
+                fi
+                
+                if [[ "$is_active" == "false" ]]; then
+                    warn "Found orphaned stack directory: $stack_dir"
+                    info "Removing orphaned directory: $stack_dir"
+                    sudo rm -rf "$stack_dir"
+                else
+                    info "Keeping active stack directory: $stack_dir"
+                fi
+            fi
+        done
+    fi
+    
+    success "Orphaned stack cleanup completed"
 }
 
 # Create backup

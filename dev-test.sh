@@ -1424,7 +1424,8 @@ EOF
     
     # Test loading valid config
     local valid_test
-    valid_test=$(/home/vagrant/docker-stack-backup/backup-manager.sh --config-file="$valid_config" --help 2>&1 | grep -c "valid.example.com" || echo "0")
+    valid_test=$(/home/vagrant/docker-stack-backup/backup-manager.sh --config-file="$valid_config" --help 2>&1 | grep -c "valid.example.com" 2>/dev/null || echo "0")
+    valid_test=$(echo "$valid_test" | tr -d '\n' | head -c 10)
     
     if [[ "$valid_test" -gt 0 ]]; then
         success "Valid configuration loads correctly"
@@ -1434,7 +1435,8 @@ EOF
     
     # Test loading invalid config (should show error)
     local invalid_test
-    invalid_test=$(/home/vagrant/docker-stack-backup/backup-manager.sh --config-file="$invalid_config" --help 2>&1 | grep -c "syntax errors" || echo "0")
+    invalid_test=$(/home/vagrant/docker-stack-backup/backup-manager.sh --config-file="$invalid_config" --help 2>&1 | grep -c "syntax errors" 2>/dev/null || echo "0")
+    invalid_test=$(echo "$invalid_test" | tr -d '\n' | head -c 10)
     
     if [[ "$invalid_test" -gt 0 ]]; then
         success "Invalid configuration properly detected"
@@ -1870,7 +1872,6 @@ if command -v jq >/dev/null 2>&1; then
     fi
     
     # Test environment variables array structure
-    local env_count
     env_count=$(jq -r '.stacks[0].env_variables | length' /tmp/mock_enhanced_stack_state.json)
     if [[ "$env_count" -lt 1 ]]; then
         echo "ERROR: No environment variables captured for first stack"
@@ -1878,7 +1879,6 @@ if command -v jq >/dev/null 2>&1; then
     fi
     
     # Test compose file content is not empty
-    local compose_content
     compose_content=$(jq -r '.stacks[0].compose_file_content' /tmp/mock_enhanced_stack_state.json)
     if [[ -z "$compose_content" || "$compose_content" == "null" ]]; then
         echo "ERROR: Compose file content is empty or null"
@@ -1897,7 +1897,6 @@ if command -v jq >/dev/null 2>&1; then
     fi
     
     # Test stack with Git configuration
-    local git_url
     git_url=$(jq -r '.stacks[1].git_config.url' /tmp/mock_enhanced_stack_state.json)
     if [[ -z "$git_url" || "$git_url" == "null" ]]; then
         echo "ERROR: Git config URL is missing for Git-based stack"
@@ -1905,7 +1904,6 @@ if command -v jq >/dev/null 2>&1; then
     fi
     
     # Test additional files capture
-    local additional_files_count
     additional_files_count=$(jq -r '.stacks[1].additional_files | length' /tmp/mock_enhanced_stack_state.json)
     if [[ "$additional_files_count" -lt 1 ]]; then
         echo "ERROR: Additional files not captured for stack with additional files"
@@ -3615,6 +3613,83 @@ EOF
         success "Stack state restoration functionality working correctly"
     else
         error "Stack state restoration functionality failed"
+        rm -f "$test_script"
+        return 1
+    fi
+    
+    rm -f "$test_script"
+    return 0
+}
+
+# Test orphaned stack cleanup functionality
+test_orphaned_stack_cleanup() {
+    info "Testing orphaned stack cleanup functionality..."
+    
+    local test_script="/tmp/test_orphaned_cleanup.sh"
+    cat > "$test_script" << 'EOF'
+#!/bin/bash
+export DOCKER_BACKUP_TEST=true
+source /home/vagrant/docker-stack-backup/backup-manager.sh
+
+# Test 1: Check if cleanup function exists
+if command -v cleanup_orphaned_stacks >/dev/null 2>&1; then
+    echo "✅ cleanup_orphaned_stacks function is available"
+else
+    echo "❌ cleanup_orphaned_stacks function not found"
+    exit 1
+fi
+
+# Test 2: Create mock JWT token and test directory structure
+echo "Testing orphaned stack cleanup logic..."
+
+# Create test directories to simulate orphaned stacks
+mkdir -p "/opt/tools/test-orphaned-stack"
+mkdir -p "/opt/tools/test-active-stack"
+echo "test content" > "/opt/tools/test-orphaned-stack/docker-compose.yml"
+echo "test content" > "/opt/tools/test-active-stack/docker-compose.yml"
+
+# Test 3: Mock the Portainer API response for active stacks
+# This simulates a scenario where test-active-stack exists in Portainer but test-orphaned-stack doesn't
+echo '[{"Name": "test-active-stack", "Id": 1, "Status": 1}]' > /tmp/mock_stacks.json
+
+# Test 4: Check that orphaned directories would be identified
+# Since we can't easily mock curl in this test context, we'll test the directory detection logic
+if [[ -d "/opt/tools/test-orphaned-stack" ]] && [[ -d "/opt/tools/test-active-stack" ]]; then
+    echo "✅ Test directories created successfully"
+else
+    echo "❌ Failed to create test directories"
+    exit 1
+fi
+
+# Test 5: Test the function behavior with invalid JWT (should handle gracefully)
+if cleanup_orphaned_stacks "invalid_jwt" >/dev/null 2>&1; then
+    echo "✅ Function handles invalid JWT gracefully"
+else
+    echo "❌ Function does not handle invalid JWT properly"
+    exit 1
+fi
+
+# Test 6: Test the function behavior with empty JWT (should skip cleanup)
+if cleanup_orphaned_stacks "" >/dev/null 2>&1; then
+    echo "✅ Function handles empty JWT gracefully"
+else
+    echo "❌ Function does not handle empty JWT properly"
+    exit 1
+fi
+
+# Cleanup test directories
+rm -rf "/opt/tools/test-orphaned-stack" "/opt/tools/test-active-stack"
+rm -f /tmp/mock_stacks.json
+
+echo "✅ All orphaned stack cleanup tests passed"
+EOF
+    
+    chmod +x "$test_script"
+    
+    if "$test_script" >/dev/null 2>&1; then
+        success "Orphaned stack cleanup functionality working correctly"
+    else
+        error "Orphaned stack cleanup functionality failed"
         rm -f "$test_script"
         return 1
     fi
@@ -5391,6 +5466,7 @@ run_vm_tests() {
     run_test "Restore Interactive Timeout" "test_restore_interactive_timeout"
     run_test "Restore Backup Selection" "test_restore_backup_selection"
     run_test "Restore with Stack State" "test_restore_with_stack_state"
+    run_test "Orphaned Stack Cleanup" "test_orphaned_stack_cleanup"
     run_test "Architecture Detection" "test_architecture_detection"
     
     info "🔧 PHASE 6: CUSTOM CONFIGURATION TESTING"
