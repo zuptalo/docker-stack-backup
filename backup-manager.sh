@@ -2809,16 +2809,43 @@ restore_enhanced_stacks() {
                     
                     # Start the stack only if it was running during backup
                     if [[ "$stack_status" == "1" ]]; then
-                        # Try stopping the stack first to ensure clean start
-                        local stop_response
-                        stop_response=$(curl -s -X POST "$PORTAINER_API_URL/stacks/$stack_id/stop" \
-                            -H "Authorization: Bearer $jwt_token")
-                        sleep 3
-                        
-                        # Now start the stack 
-                        local start_response
-                        start_response=$(curl -s -X POST "$PORTAINER_API_URL/stacks/$stack_id/start" \
-                            -H "Authorization: Bearer $jwt_token")
+                        # Use stack update/redeploy approach which is more reliable than start/stop
+                        if [[ -n "$compose_content" && "$compose_content" != "null" && "$compose_content" != "" ]]; then
+                            info "Redeploying stack via update API: $stack_name"
+                            
+                            # Create update payload with compose content for reliable deployment
+                            local redeploy_payload
+                            redeploy_payload=$(jq -n \
+                                --arg compose "$compose_content" \
+                                --argjson env "$env_vars" \
+                                '{
+                                    stackFileContent: $compose,
+                                    env: $env,
+                                    prune: false
+                                }')
+                            
+                            # Update the stack (this effectively redeploys it)
+                            local redeploy_response
+                            redeploy_response=$(curl -s -X PUT "$PORTAINER_API_URL/stacks/$stack_id" \
+                                -H "Authorization: Bearer $jwt_token" \
+                                -H "Content-Type: application/json" \
+                                -d "$redeploy_payload")
+                            
+                            if echo "$redeploy_response" | grep -q "error\|Error" 2>/dev/null; then
+                                warn "Stack redeploy failed: $stack_name - trying start API"
+                                # Fallback to start API if redeploy fails
+                                local start_response
+                                start_response=$(curl -s -X POST "$PORTAINER_API_URL/stacks/$stack_id/start" \
+                                    -H "Authorization: Bearer $jwt_token")
+                            else
+                                info "Stack redeploy successful: $stack_name"
+                            fi
+                        else
+                            # No compose content available, try basic start
+                            local start_response
+                            start_response=$(curl -s -X POST "$PORTAINER_API_URL/stacks/$stack_id/start" \
+                                -H "Authorization: Bearer $jwt_token")
+                        fi
                         
                         # Wait for stack to start up
                         sleep 8  # Increased wait time for stack startup
@@ -2826,7 +2853,7 @@ restore_enhanced_stacks() {
                         # Verify the stack is actually running by checking container status
                         local containers_running=false
                         local retries=0
-                        local max_retries=10  # Increased retry attempts
+                        local max_retries=6  # Reduced retries since we're using better primary approach
                         
                         while [[ $retries -lt $max_retries ]]; do
                             # Try multiple approaches to find running containers for this stack
@@ -2853,43 +2880,8 @@ restore_enhanced_stacks() {
                                 info "Attempt $((retries + 1))/$max_retries: No running containers found for stack $stack_name"
                             fi
                             
-                            # If initial API approach failed, try redeploying the stack with compose content
-                            if [[ $retries -eq 4 ]] && [[ -n "$compose_content" && "$compose_content" != "null" && "$compose_content" != "" ]]; then
-                                info "Standard API start failed, attempting stack redeploy for: $stack_name"
-                                
-                                # Get endpoint ID (usually 1 for local Docker)
-                                local endpoint_id=1
-                                
-                                # Force stop the stack first
-                                local stop_response
-                                stop_response=$(curl -s -X POST "$PORTAINER_API_URL/stacks/$stack_id/stop" \
-                                    -H "Authorization: Bearer $jwt_token")
-                                sleep 2
-                                
-                                # Then start it again with updated compose
-                                local redeploy_payload
-                                redeploy_payload=$(jq -n \
-                                    --arg compose "$compose_content" \
-                                    --argjson env "$env_vars" \
-                                    '{
-                                        stackFileContent: $compose,
-                                        env: $env,
-                                        prune: false
-                                    }')
-                                
-                                # Update and start the stack
-                                local update_response
-                                update_response=$(curl -s -X PUT "$PORTAINER_API_URL/stacks/$stack_id" \
-                                    -H "Authorization: Bearer $jwt_token" \
-                                    -H "Content-Type: application/json" \
-                                    -d "$redeploy_payload")
-                                
-                                sleep 5
-                                info "Stack redeploy attempted for: $stack_name"
-                            fi
-                            
-                            # Try direct docker approach if API methods keep failing
-                            if [[ $retries -eq 7 ]]; then
+                            # Final fallback: try direct docker approach if API methods failed
+                            if [[ $retries -eq 4 ]]; then
                                 info "API approaches not working, trying direct docker commands for: $stack_name"
                                 
                                 # Get all containers that belong to this stack (including stopped ones)
@@ -2916,7 +2908,7 @@ restore_enhanced_stacks() {
                             fi
                             
                             retries=$((retries + 1))
-                            sleep 4  # Longer wait between retries
+                            sleep 3  # Wait between retries
                         done
                         
                         if [[ "$containers_running" == "true" ]]; then
