@@ -3478,24 +3478,101 @@ create_stack_from_compose() {
     local compose_content
     compose_content=$(cat "$compose_file")
     
+    # Get the correct endpoint ID dynamically
+    local endpoints_response
+    endpoints_response=$(curl -s -H "Authorization: Bearer $jwt_token" "$PORTAINER_API_URL/endpoints")
+    
+    if [[ -n "$endpoints_response" ]] && echo "$endpoints_response" | jq -e '.[0].Id' >/dev/null 2>&1; then
+        endpoint_id=$(echo "$endpoints_response" | jq -r '.[0].Id')
+        info "Using endpoint ID: $endpoint_id"
+    else
+        warn "Could not get endpoint ID, using default: 1"
+        endpoint_id=1
+    fi
+    
+    # Create stack payload with proper JSON formatting
+    local payload
+    payload=$(jq -n \
+        --arg name "$stack_name" \
+        --arg compose "$compose_content" \
+        '{
+            Name: $name,
+            ComposeContent: $compose,
+            Env: []
+        }')
+    
+    info "Creating stack via API: $stack_name"
+    info "API URL: $PORTAINER_API_URL/stacks?type=2&method=string&endpointId=$endpoint_id"
+    
     # Create stack via Portainer API
     local stack_response
     stack_response=$(curl -s -X POST "$PORTAINER_API_URL/stacks?type=2&method=string&endpointId=$endpoint_id" \
         -H "Authorization: Bearer $jwt_token" \
         -H "Content-Type: application/json" \
-        -d "{
-            \"Name\": \"$stack_name\",
-            \"ComposeContent\": $(echo "$compose_content" | jq -Rs .),
-            \"Env\": []
-        }")
+        -d "$payload")
     
-    if echo "$stack_response" | jq -e '.Id' >/dev/null 2>&1; then
+    info "API Response length: ${#stack_response}"
+    
+    if [[ -n "$stack_response" ]] && echo "$stack_response" | jq -e '.Id' >/dev/null 2>&1; then
         local stack_id
         stack_id=$(echo "$stack_response" | jq -r '.Id')
         success "Created stack: $stack_name (ID: $stack_id)"
     else
         warn "Failed to create stack: $stack_name"
-        warn "API Response: $stack_response"
+        if [[ -n "$stack_response" ]]; then
+            warn "API Response: $stack_response"
+            # Try to parse error message if available
+            local error_msg
+            error_msg=$(echo "$stack_response" | jq -r '.message // .err // .error // "Unknown error"' 2>/dev/null || echo "Invalid JSON response")
+            warn "Error details: $error_msg"
+        else
+            warn "Empty API response - possible authentication or connectivity issue"
+        fi
+        
+        # Try alternative approach: use Docker Compose directly but ensure Portainer can manage it
+        warn "Attempting fallback: direct compose deployment with Portainer labels"
+        create_stack_via_compose "$stack_name" "$compose_file"
+    fi
+}
+
+# Create stack using Docker Compose with Portainer-compatible labels
+create_stack_via_compose() {
+    local stack_name="$1"
+    local compose_file="$2"
+    
+    info "Creating stack via Docker Compose: $stack_name"
+    
+    # Navigate to the stack directory
+    local stack_dir
+    stack_dir=$(dirname "$compose_file")
+    
+    cd "$stack_dir" || {
+        error "Could not navigate to stack directory: $stack_dir"
+        return 1
+    }
+    
+    # Create the stack using docker compose with project name
+    if sudo -u "$PORTAINER_USER" docker compose -p "$stack_name" up -d; then
+        success "Created stack via Docker Compose: $stack_name"
+        
+        # Add labels to make it manageable by Portainer
+        local containers
+        containers=$(sudo -u "$PORTAINER_USER" docker ps --filter "label=com.docker.compose.project=$stack_name" --format "{{.Names}}")
+        
+        if [[ -n "$containers" ]]; then
+            info "Adding Portainer management labels to containers..."
+            echo "$containers" | while read -r container_name; do
+                if [[ -n "$container_name" ]]; then
+                    # Add Portainer management labels
+                    sudo -u "$PORTAINER_USER" docker update --label "io.portainer.stack.name=$stack_name" "$container_name" || true
+                fi
+            done
+        fi
+        
+        return 0
+    else
+        error "Failed to create stack via Docker Compose: $stack_name"
+        return 1
     fi
 }
 
