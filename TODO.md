@@ -6,6 +6,44 @@ This document tracks the implementation of missing features and improvements ide
 
 ---
 
+## Phase 0: Critical Restore Behavior Improvements (Immediate Priority)
+
+### 🔴 **0.1. Implement Snapshot Restore Philosophy**
+- **Status**: ❌ Not Started
+- **Priority**: Critical
+- **Description**: Implement true snapshot restore that removes stacks not present in backup during restore
+- **Requirements**:
+  - Compare current stacks with backup stack list
+  - Remove stacks that exist in Portainer but not in backup
+  - Maintain current behavior for stacks that exist in both
+  - Ensure clean state after restore matches backup point-in-time
+- **Impact**: True disaster recovery and predictable restore behavior
+- **Design Decision**: Restore should return system to EXACTLY the state when backup was created
+
+### 🔴 **0.2. Add Portainer Restart After Restore Operations**
+- **Status**: ❌ Not Started
+- **Priority**: Critical
+- **Description**: Restart Portainer after restore operations to ensure clean state consistency
+- **Requirements**:
+  - Keep Portainer running during backup (needed for API calls)
+  - Restart Portainer after restore completion
+  - Handle restart failures gracefully
+  - Ensure Portainer reflects actual restored state
+- **Impact**: Eliminates caching issues and ensures UI reflects true system state
+
+### 🔴 **0.3. Add Comprehensive Tests for Snapshot Restore Behavior**
+- **Status**: ❌ Not Started
+- **Priority**: High
+- **Description**: Create comprehensive tests for new snapshot restore behavior
+- **Requirements**:
+  - Test scenario: backup A (2 stacks) → add stack → restore A → verify only 2 stacks remain
+  - Test scenario: backup B (3 stacks) → remove stack → restore B → verify 3 stacks restored
+  - Test Portainer restart functionality
+  - Test error handling for restore failures
+- **Impact**: Ensures reliability of critical restore behavior changes
+
+---
+
 ## Phase 1: Critical Missing Functionality (High Priority)
 
 ### ✅ **1. DNS Verification in Setup Command**
