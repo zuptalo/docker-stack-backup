@@ -3422,20 +3422,46 @@ restore_stacks_from_backup() {
 restore_critical_stacks_fallback() {
     info "Attempting to restore critical stacks using fallback detection..."
     
+    # Give Portainer a moment to fully initialize after restart
+    info "Waiting for Portainer API to be fully ready..."
+    sleep 5
+    
     # Load Portainer credentials
     source "$PORTAINER_PATH/.credentials"
     
-    # Login to Portainer API
-    local auth_response
-    auth_response=$(curl -s -X POST "$PORTAINER_API_URL/auth" \
-        -H "Content-Type: application/json" \
-        -d "{\"Username\": \"$PORTAINER_ADMIN_USERNAME\", \"Password\": \"$PORTAINER_ADMIN_PASSWORD\"}")
+    # Login to Portainer API with retry logic
+    local jwt_token=""
+    local auth_attempts=0
+    local max_auth_attempts=3
     
-    local jwt_token
-    jwt_token=$(echo "$auth_response" | jq -r '.jwt // empty')
+    while [[ $auth_attempts -lt $max_auth_attempts && -z "$jwt_token" ]]; do
+        info "Authentication attempt $((auth_attempts + 1))/$max_auth_attempts..."
+        local auth_response
+        auth_response=$(curl -s -X POST "$PORTAINER_API_URL/auth" \
+            -H "Content-Type: application/json" \
+            -d "{\"Username\": \"$PORTAINER_ADMIN_USERNAME\", \"Password\": \"$PORTAINER_ADMIN_PASSWORD\"}")
+        
+        info "Auth response length: ${#auth_response}"
+        
+        if [[ -n "$auth_response" ]]; then
+            jwt_token=$(echo "$auth_response" | jq -r '.jwt // empty')
+            if [[ -n "$jwt_token" && "$jwt_token" != "null" && "$jwt_token" != "empty" ]]; then
+                info "Successfully authenticated with Portainer API"
+                break
+            else
+                warn "Authentication response: $auth_response"
+            fi
+        fi
+        
+        auth_attempts=$((auth_attempts + 1))
+        if [[ $auth_attempts -lt $max_auth_attempts ]]; then
+            info "Waiting before retry..."
+            sleep 10
+        fi
+    done
     
-    if [[ -z "$jwt_token" ]]; then
-        error "Failed to authenticate with Portainer API for fallback restore"
+    if [[ -z "$jwt_token" || "$jwt_token" == "null" || "$jwt_token" == "empty" ]]; then
+        error "Failed to authenticate with Portainer API after $max_auth_attempts attempts"
         return 1
     fi
     
@@ -3449,13 +3475,26 @@ restore_critical_stacks_fallback() {
     fi
     
     # Check for other common stacks
+    info "Scanning $TOOLS_PATH for additional stacks..."
     for stack_dir in "$TOOLS_PATH"/*; do
-        if [[ -d "$stack_dir" && -f "$stack_dir/docker-compose.yml" ]]; then
-            local stack_name=$(basename "$stack_dir")
-            if [[ "$stack_name" != "nginx-proxy-manager" ]]; then
-                info "Detected $stack_name data - creating stack..."
-                create_stack_from_compose "$stack_name" "$stack_dir/docker-compose.yml" "$jwt_token" "$endpoint_id"
+        local stack_name=$(basename "$stack_dir")
+        info "Examining directory: $stack_dir (stack name: $stack_name)"
+        
+        if [[ -d "$stack_dir" ]]; then
+            info "  Directory exists: $stack_dir"
+            if [[ -f "$stack_dir/docker-compose.yml" ]]; then
+                info "  Found docker-compose.yml: $stack_dir/docker-compose.yml"
+                if [[ "$stack_name" != "nginx-proxy-manager" ]]; then
+                    info "Detected $stack_name data - creating stack..."
+                    create_stack_from_compose "$stack_name" "$stack_dir/docker-compose.yml" "$jwt_token" "$endpoint_id"
+                else
+                    info "  Skipping nginx-proxy-manager (already processed)"
+                fi
+            else
+                info "  No docker-compose.yml found in: $stack_dir"
             fi
+        else
+            info "  Not a directory: $stack_dir"
         fi
     done
     
@@ -3555,19 +3594,9 @@ create_stack_via_compose() {
     if sudo -u "$PORTAINER_USER" docker compose -p "$stack_name" up -d; then
         success "Created stack via Docker Compose: $stack_name"
         
-        # Add labels to make it manageable by Portainer
-        local containers
-        containers=$(sudo -u "$PORTAINER_USER" docker ps --filter "label=com.docker.compose.project=$stack_name" --format "{{.Names}}")
-        
-        if [[ -n "$containers" ]]; then
-            info "Adding Portainer management labels to containers..."
-            echo "$containers" | while read -r container_name; do
-                if [[ -n "$container_name" ]]; then
-                    # Add Portainer management labels
-                    sudo -u "$PORTAINER_USER" docker update --label "io.portainer.stack.name=$stack_name" "$container_name" || true
-                fi
-            done
-        fi
+        # Note: Docker Compose already adds proper labels for Portainer management
+        # The com.docker.compose.project label allows Portainer to detect and manage the stack
+        info "Stack created with Docker Compose - Portainer should detect it automatically"
         
         return 0
     else
