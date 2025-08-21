@@ -3156,6 +3156,188 @@ cleanup_orphaned_stacks() {
     success "Orphaned stack cleanup completed"
 }
 
+# Implement snapshot restore philosophy - remove stacks not present in backup
+implement_snapshot_restore() {
+    local stack_state_file="$1"
+    
+    if [[ ! -f "$stack_state_file" ]]; then
+        warn "Stack state file not found for snapshot restore: $stack_state_file"
+        return 0
+    fi
+    
+    info "Implementing snapshot restore philosophy - ensuring exact state match..."
+    
+    # Load Portainer credentials
+    source "$PORTAINER_PATH/.credentials"
+    
+    # Login to Portainer API
+    local auth_response
+    auth_response=$(curl -s -X POST "$PORTAINER_API_URL/auth" \
+        -H "Content-Type: application/json" \
+        -d "{\"Username\": \"$PORTAINER_ADMIN_USERNAME\", \"Password\": \"$PORTAINER_ADMIN_PASSWORD\"}")
+    
+    local jwt_token
+    jwt_token=$(echo "$auth_response" | jq -r '.jwt // empty')
+    
+    if [[ -z "$jwt_token" ]]; then
+        warn "Failed to authenticate with Portainer API for snapshot restore"
+        return 0
+    fi
+    
+    # Get stacks that were in the backup
+    local backup_stack_names
+    backup_stack_names=$(jq -r '.stacks[].name' "$stack_state_file" 2>/dev/null)
+    
+    if [[ -z "$backup_stack_names" ]]; then
+        info "No stacks found in backup - this will result in removing all current stacks"
+    else
+        info "Backup contains the following stacks: $(echo "$backup_stack_names" | tr '\n' ' ')"
+    fi
+    
+    # Get current stacks from Portainer
+    local current_stacks
+    current_stacks=$(curl -s -H "Authorization: Bearer $jwt_token" "$PORTAINER_API_URL/stacks")
+    
+    if [[ -z "$current_stacks" ]] || ! echo "$current_stacks" | jq -e . >/dev/null 2>&1; then
+        warn "Could not retrieve current stacks from Portainer API, skipping snapshot restore"
+        return 0
+    fi
+    
+    # Get current stack names
+    local current_stack_names
+    current_stack_names=$(echo "$current_stacks" | jq -r '.[].Name' 2>/dev/null)
+    
+    if [[ -z "$current_stack_names" ]]; then
+        info "No current stacks found - nothing to remove for snapshot restore"
+        return 0
+    fi
+    
+    info "Current stacks in Portainer: $(echo "$current_stack_names" | tr '\n' ' ')"
+    
+    # Find stacks that exist in current system but not in backup
+    local stacks_to_remove=""
+    while read -r current_stack; do
+        if [[ -n "$current_stack" ]]; then
+            local found_in_backup=false
+            if [[ -n "$backup_stack_names" ]]; then
+                while read -r backup_stack; do
+                    if [[ "$current_stack" == "$backup_stack" ]]; then
+                        found_in_backup=true
+                        break
+                    fi
+                done <<< "$backup_stack_names"
+            fi
+            
+            if [[ "$found_in_backup" == "false" ]]; then
+                stacks_to_remove="$stacks_to_remove$current_stack\n"
+            fi
+        fi
+    done <<< "$current_stack_names"
+    
+    # Remove stacks that weren't in the backup
+    if [[ -n "$stacks_to_remove" ]]; then
+        stacks_to_remove=$(echo -e "$stacks_to_remove" | sed '/^$/d')  # Remove empty lines
+        info "Removing stacks that were not present in backup for true snapshot restore:"
+        echo "$stacks_to_remove" | while read -r stack_to_remove; do
+            if [[ -n "$stack_to_remove" ]]; then
+                local stack_id
+                stack_id=$(echo "$current_stacks" | jq -r ".[] | select(.Name == \"$stack_to_remove\") | .Id")
+                
+                if [[ -n "$stack_id" && "$stack_id" != "null" ]]; then
+                    info "Removing stack not in backup: $stack_to_remove (ID: $stack_id)"
+                    
+                    # Delete the stack via API
+                    local delete_response
+                    delete_response=$(curl -s -X DELETE "$PORTAINER_API_URL/stacks/$stack_id" \
+                        -H "Authorization: Bearer $jwt_token")
+                    
+                    if echo "$delete_response" | grep -q "error\|Error" 2>/dev/null; then
+                        warn "Failed to delete stack: $stack_to_remove - API Error: $delete_response"
+                    else
+                        info "Successfully removed stack: $stack_to_remove"
+                        
+                        # Also remove any associated data directory
+                        local stack_data_dir="$TOOLS_PATH/$stack_to_remove"
+                        if [[ -d "$stack_data_dir" ]]; then
+                            info "Removing data directory for deleted stack: $stack_data_dir"
+                            sudo rm -rf "$stack_data_dir"
+                        fi
+                    fi
+                else
+                    warn "Could not find stack ID for: $stack_to_remove"
+                fi
+            fi
+        done
+        
+        success "Snapshot restore completed - system now matches backup state exactly"
+    else
+        info "No extra stacks found - current state already matches backup"
+    fi
+}
+
+# Restart Portainer after restore operations to ensure clean state consistency
+restart_portainer_after_restore() {
+    info "Restarting Portainer to ensure clean state consistency after restore..."
+    
+    # Check if Portainer is running
+    local portainer_running=false
+    if sudo -u "$PORTAINER_USER" docker ps --format "{{.Names}}" | grep -q "^portainer$"; then
+        portainer_running=true
+        info "Portainer is currently running - performing restart"
+    else
+        info "Portainer is not running - starting it"
+    fi
+    
+    # Navigate to Portainer directory
+    cd "$PORTAINER_PATH" || {
+        error "Could not navigate to Portainer directory: $PORTAINER_PATH"
+        return 1
+    }
+    
+    # Restart Portainer using docker-compose
+    if [[ "$portainer_running" == "true" ]]; then
+        info "Restarting Portainer container..."
+        if ! sudo -u "$PORTAINER_USER" docker-compose restart; then
+            warn "Docker-compose restart failed, trying stop/start sequence"
+            sudo -u "$PORTAINER_USER" docker-compose stop
+            sleep 5
+            sudo -u "$PORTAINER_USER" docker-compose up -d
+        fi
+    else
+        info "Starting Portainer container..."
+        sudo -u "$PORTAINER_USER" docker-compose up -d
+    fi
+    
+    # Wait for Portainer to be ready
+    local max_wait=60
+    local wait_count=0
+    info "Waiting for Portainer to be ready after restart..."
+    
+    while [[ $wait_count -lt $max_wait ]]; do
+        if curl -s "http://localhost:9000" >/dev/null 2>&1; then
+            success "Portainer is ready and accessible"
+            break
+        fi
+        
+        sleep 2
+        wait_count=$((wait_count + 2))
+        
+        if [[ $((wait_count % 10)) -eq 0 ]]; then
+            info "Still waiting for Portainer... ($wait_count/${max_wait}s)"
+        fi
+    done
+    
+    if [[ $wait_count -ge $max_wait ]]; then
+        warn "Portainer restart completed but may not be fully ready yet"
+        warn "Services may take additional time to initialize"
+    else
+        success "Portainer restart completed successfully"
+    fi
+    
+    # Give a bit more time for internal initialization
+    sleep 10
+}
+
 # Create backup
 create_backup() {
     info "Starting backup process..."
@@ -3526,6 +3708,8 @@ restore_backup() {
     if tar -tf "$selected_backup" | grep -q "stack_states.json"; then
         sudo tar -xzf "$selected_backup" -C /tmp stack_states.json 2>/dev/null || true
         if [[ -f "$stack_state_file" ]]; then
+            # Implement snapshot restore philosophy - remove stacks not in backup
+            implement_snapshot_restore "$stack_state_file"
             restart_stacks "$stack_state_file"
             sudo rm -f "$stack_state_file"
         fi
@@ -3592,6 +3776,9 @@ restore_backup() {
     
     # Clean up temporary directory
     rm -rf "$TEMP_DIR"
+    
+    # Restart Portainer after restore to ensure clean state consistency
+    restart_portainer_after_restore
     
     # Validate system state after restore
     if validate_system_state "restore"; then
