@@ -2625,11 +2625,8 @@ stop_containers() {
     info "Stopping containers gracefully..."
     info "Keeping Portainer running to manage backup process"
     
-    # Record which containers are currently running (excluding Portainer)
-    local running_containers_file="$TEMP_DIR/running_containers.txt"
-    sudo -u "$PORTAINER_USER" docker ps --format "{{.Names}}" | grep -v "^portainer$" > "$running_containers_file" || true
-    
-    info "Recording running containers for restoration: $(cat "$running_containers_file" | tr '\n' ' ')"
+    # Note: No need to track running containers for snapshot restore 
+    # We will restore only what's in the backup via Portainer API
     
     # Stop nginx-proxy-manager
     if sudo -u "$PORTAINER_USER" docker ps | grep -q "nginx-proxy-manager"; then
@@ -3302,10 +3299,12 @@ implement_true_snapshot_restore() {
             restore_stacks_from_backup "$stack_state_file"
             sudo rm -f "$stack_state_file"
         else
-            warn "No stack state file found in backup - only Portainer will be running"
+            warn "No stack state file found in backup - using fallback detection"
+            restore_critical_stacks_fallback
         fi
     else
-        warn "Backup does not contain stack states - only Portainer will be running"
+        warn "Backup does not contain stack states - using fallback detection"
+        restore_critical_stacks_fallback
     fi
     
     # Step 5: Final Portainer restart to ensure clean state
@@ -3425,6 +3424,87 @@ restore_stacks_from_backup() {
     restart_stacks "$stack_state_file"
     
     success "Stack restoration from backup completed"
+}
+
+# Fallback function to restore critical stacks when stack states are missing
+restore_critical_stacks_fallback() {
+    info "Attempting to restore critical stacks using fallback detection..."
+    
+    # Load Portainer credentials
+    source "$PORTAINER_PATH/.credentials"
+    
+    # Login to Portainer API
+    local auth_response
+    auth_response=$(curl -s -X POST "$PORTAINER_API_URL/auth" \
+        -H "Content-Type: application/json" \
+        -d "{\"Username\": \"$PORTAINER_ADMIN_USERNAME\", \"Password\": \"$PORTAINER_ADMIN_PASSWORD\"}")
+    
+    local jwt_token
+    jwt_token=$(echo "$auth_response" | jq -r '.jwt // empty')
+    
+    if [[ -z "$jwt_token" ]]; then
+        error "Failed to authenticate with Portainer API for fallback restore"
+        return 1
+    fi
+    
+    # Get endpoint ID (usually 1 for local Docker)
+    local endpoint_id=1
+    
+    # Check for nginx-proxy-manager stack
+    if [[ -d "$TOOLS_PATH/nginx-proxy-manager" && -f "$TOOLS_PATH/nginx-proxy-manager/docker-compose.yml" ]]; then
+        info "Detected nginx-proxy-manager data - creating stack..."
+        create_stack_from_compose "nginx-proxy-manager" "$TOOLS_PATH/nginx-proxy-manager/docker-compose.yml" "$jwt_token" "$endpoint_id"
+    fi
+    
+    # Check for other common stacks
+    for stack_dir in "$TOOLS_PATH"/*; do
+        if [[ -d "$stack_dir" && -f "$stack_dir/docker-compose.yml" ]]; then
+            local stack_name=$(basename "$stack_dir")
+            if [[ "$stack_name" != "nginx-proxy-manager" ]]; then
+                info "Detected $stack_name data - creating stack..."
+                create_stack_from_compose "$stack_name" "$stack_dir/docker-compose.yml" "$jwt_token" "$endpoint_id"
+            fi
+        fi
+    done
+    
+    success "Fallback stack restoration completed"
+}
+
+# Create a stack from docker-compose file via Portainer API
+create_stack_from_compose() {
+    local stack_name="$1"
+    local compose_file="$2"
+    local jwt_token="$3"
+    local endpoint_id="$4"
+    
+    if [[ ! -f "$compose_file" ]]; then
+        warn "Compose file not found for $stack_name: $compose_file"
+        return 1
+    fi
+    
+    # Read compose file content
+    local compose_content
+    compose_content=$(cat "$compose_file")
+    
+    # Create stack via Portainer API
+    local stack_response
+    stack_response=$(curl -s -X POST "$PORTAINER_API_URL/stacks?type=2&method=string&endpointId=$endpoint_id" \
+        -H "Authorization: Bearer $jwt_token" \
+        -H "Content-Type: application/json" \
+        -d "{
+            \"Name\": \"$stack_name\",
+            \"ComposeContent\": $(echo "$compose_content" | jq -Rs .),
+            \"Env\": []
+        }")
+    
+    if echo "$stack_response" | jq -e '.Id' >/dev/null 2>&1; then
+        local stack_id
+        stack_id=$(echo "$stack_response" | jq -r '.Id')
+        success "Created stack: $stack_name (ID: $stack_id)"
+    else
+        warn "Failed to create stack: $stack_name"
+        warn "API Response: $stack_response"
+    fi
 }
 
 # Restart Portainer after restore operations to ensure clean state consistency

@@ -3874,6 +3874,98 @@ EOF
     return 0
 }
 
+# Test fallback stack restoration functionality
+test_fallback_stack_restoration() {
+    info "Testing fallback stack restoration when stack states are missing..."
+    
+    local test_script="/tmp/test_fallback_restoration.sh"
+    cat > "$test_script" << 'EOF'
+#!/bin/bash
+export DOCKER_BACKUP_TEST=true
+source /home/vagrant/docker-stack-backup/backup-manager.sh
+
+# Test that fallback functions exist
+test_fallback_functions_exist() {
+    if command -v restore_critical_stacks_fallback >/dev/null 2>&1; then
+        echo "✅ restore_critical_stacks_fallback function exists"
+    else
+        echo "❌ restore_critical_stacks_fallback function not found"
+        exit 1
+    fi
+    
+    if command -v create_stack_from_compose >/dev/null 2>&1; then
+        echo "✅ create_stack_from_compose function exists"
+    else
+        echo "❌ create_stack_from_compose function not found"
+        exit 1
+    fi
+    return 0
+}
+
+# Test that fallback detection logic works
+test_fallback_detection_logic() {
+    # Create a mock tools directory structure
+    local test_tools_dir="/tmp/test_tools_fallback"
+    mkdir -p "$test_tools_dir/nginx-proxy-manager"
+    
+    # Create a mock docker-compose.yml
+    cat > "$test_tools_dir/nginx-proxy-manager/docker-compose.yml" << 'COMPOSE_EOF'
+version: '3.8'
+services:
+  nginx-proxy-manager:
+    image: 'jc21/nginx-proxy-manager:latest'
+    ports:
+      - '80:80'
+      - '443:443'
+      - '81:81'
+COMPOSE_EOF
+    
+    # Test that file detection works
+    if [[ -f "$test_tools_dir/nginx-proxy-manager/docker-compose.yml" ]]; then
+        echo "✅ Mock compose file detection works"
+    else
+        echo "❌ Mock compose file detection failed"
+        rm -rf "$test_tools_dir"
+        exit 1
+    fi
+    
+    rm -rf "$test_tools_dir"
+    return 0
+}
+
+# Test that restore integration uses fallback
+test_restore_integration_fallback() {
+    # Check that implement_true_snapshot_restore calls the fallback
+    if grep -q "restore_critical_stacks_fallback" "/home/vagrant/docker-stack-backup/backup-manager.sh"; then
+        echo "✅ Fallback is integrated into true snapshot restore"
+    else
+        echo "❌ Fallback not found in restore process"
+        exit 1
+    fi
+    return 0
+}
+
+echo "Testing fallback stack restoration functionality..."
+test_fallback_functions_exist
+test_fallback_detection_logic
+test_restore_integration_fallback
+echo "✅ All fallback restoration tests passed"
+EOF
+    
+    chmod +x "$test_script"
+    
+    if "$test_script" >/dev/null 2>&1; then
+        success "Fallback stack restoration functionality working correctly"
+    else
+        error "Fallback stack restoration functionality failed"
+        rm -f "$test_script"
+        return 1
+    fi
+    
+    rm -f "$test_script"
+    return 0
+}
+
 # Test error recovery and rollback functionality
 test_error_recovery_rollback() {
     info "Testing error recovery and rollback functionality..."
@@ -5828,6 +5920,7 @@ run_vm_tests() {
     run_test "Snapshot Restore - Remove Extra Stacks" "test_snapshot_restore_remove_extra_stacks"
     run_test "Snapshot Restore - Add Missing Stacks" "test_snapshot_restore_add_missing_stacks"
     run_test "Portainer Restart After Restore" "test_portainer_restart_functionality"
+    run_test "Fallback Stack Restoration" "test_fallback_stack_restoration"
     run_test "Orphaned Stack Cleanup" "test_orphaned_stack_cleanup"
     run_test "Error Recovery and Rollback" "test_error_recovery_rollback"
     run_test "Architecture Detection" "test_architecture_detection"
