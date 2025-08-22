@@ -6425,23 +6425,23 @@ main() {
             
             # Show Portainer URL
             if ! is_test_environment && [[ "${SKIP_SSL_CERTIFICATES:-false}" != "true" ]]; then
-                printf "  • Portainer:              %b\n" "${GREEN}$PORTAINER_URL${NC}"
+                printf "  • Portainer:              %b\n" "${GREEN}${PORTAINER_URL:-"portainer.domain.com"}${NC}"
             else
                 if is_test_environment; then
                     printf "  • Portainer:              %b\n" "${GREEN}http://localhost:9000${NC} (test environment)"
                 else
-                    printf "  • Portainer:              %b\n" "${YELLOW}http://$PORTAINER_URL${NC} (configure DNS for HTTPS)"
+                    printf "  • Portainer:              %b\n" "${YELLOW}http://${PORTAINER_URL:-"portainer.domain.com"}${NC} (configure DNS for HTTPS)"
                 fi
             fi
             
             # Show nginx-proxy-manager URL
             if ! is_test_environment && [[ "${SKIP_SSL_CERTIFICATES:-false}" != "true" ]]; then
-                printf "  • nginx-proxy-manager:    %b\n" "${GREEN}https://$NPM_URL${NC}"
+                printf "  • nginx-proxy-manager:    %b\n" "${GREEN}https://${NPM_URL:-"npm.domain.com"}${NC}"
             else
                 if is_test_environment; then
                     printf "  • nginx-proxy-manager:    %b\n" "${GREEN}http://localhost:81${NC} (test environment)"
                 else
-                    printf "  • nginx-proxy-manager:    %b\n" "${YELLOW}http://$NPM_URL${NC} (configure DNS for HTTPS)"
+                    printf "  • nginx-proxy-manager:    %b\n" "${YELLOW}http://${NPM_URL:-"npm.domain.com"}${NC} (configure DNS for HTTPS)"
                 fi
             fi
             
