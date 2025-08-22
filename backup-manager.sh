@@ -2654,9 +2654,9 @@ gracefully_stop_all_stacks() {
                     stack_name=$(echo "$stacks_response" | jq -r ".[] | select(.Id == $stack_id) | .Name" 2>/dev/null)
                     info "Stopping stack: $stack_name (ID: $stack_id)"
                     
-                    # Stop the stack
-                    curl -s -X POST -H "Authorization: Bearer $jwt_token" \
-                        "$PORTAINER_API_URL/stacks/$stack_id/stop" >/dev/null 2>&1 || true
+                    # Note: Portainer doesn't have a direct stop endpoint for stacks
+                    # Stacks will be stopped via docker compose down in the container stop phase
+                    info "Stack $stack_name will be stopped via docker compose down"
                 fi
             done
             
@@ -2670,58 +2670,51 @@ gracefully_stop_all_stacks() {
     fi
 }
 
-# Stop containers gracefully for backup (including Portainer shutdown at end)
+# Stop containers gracefully for backup (keeping Portainer running for API access)
 stop_containers() {
-    info "Stopping all containers gracefully for backup..."
+    info "Stopping containers gracefully..."
+    info "Keeping Portainer running to manage backup process"
     
-    # First, gracefully stop all stacks through Portainer API
-    gracefully_stop_all_stacks
+    # Note: No need to track running containers for snapshot restore 
+    # We will restore only what's in the backup via Portainer API
     
-    # Stop nginx-proxy-manager first (reverse proxy)
+    # Stop nginx-proxy-manager
     if sudo -u "$PORTAINER_USER" docker ps | grep -q "nginx-proxy-manager"; then
-        info "Stopping nginx-proxy-manager..."
-        cd "$TOOLS_PATH/nginx-proxy-manager"
-        sudo -u "$PORTAINER_USER" docker compose down
-        info "Stopped nginx-proxy-manager with compose down"
+        sudo -u "$PORTAINER_USER" docker stop nginx-proxy-manager
+        info "Stopped nginx-proxy-manager"
     fi
     
-    # Stop all other containers (excluding Portainer for now)
+    # Stop all other containers (excluding Portainer - keep it running for API management)
     local running_containers
-    running_containers=$(sudo -u "$PORTAINER_USER" docker ps --format "{{.Names}}" | grep -v "^portainer$")
+    running_containers=$(sudo -u "$PORTAINER_USER" docker ps --format "{{.Names}}")
     
     if [[ -n "$running_containers" ]]; then
-        info "Stopping remaining containers: $(echo "$running_containers" | tr '\n' ' ')"
+        # Stop each container except Portainer
         echo "$running_containers" | while read -r container_name; do
-            if [[ -n "$container_name" ]]; then
+            if [[ "$container_name" != "portainer" ]]; then
                 sudo -u "$PORTAINER_USER" docker stop "$container_name"
                 info "Stopped container: $container_name"
             fi
         done
     fi
     
-    # Finally stop Portainer to ensure complete state capture
-    if sudo -u "$PORTAINER_USER" docker ps --format "{{.Names}}" | grep -q "^portainer$"; then
-        info "Stopping Portainer for complete backup state capture..."
-        cd "$PORTAINER_PATH"
-        sudo -u "$PORTAINER_USER" docker compose down
-        info "Stopped Portainer with compose down"
-    fi
-    
-    success "All containers stopped gracefully for backup"
+    success "Containers stopped gracefully (Portainer kept running)"
 }
 
 # Start containers after backup
 start_containers() {
     info "Starting containers after backup..."
     
-    # Start Portainer first
-    info "Starting Portainer..."
-    cd "$PORTAINER_PATH"
-    sudo -u "$PORTAINER_USER" docker compose up -d
-    
-    # Wait for Portainer to be fully ready
-    info "Waiting for Portainer to become responsive..."
-    wait_for_portainer_ready
+    # Check if Portainer is running, start it if not
+    if ! sudo -u "$PORTAINER_USER" docker ps --format "{{.Names}}" | grep -q "^portainer$"; then
+        warn "Portainer was stopped during backup, restarting..."
+        cd "$PORTAINER_PATH"
+        sudo -u "$PORTAINER_USER" docker compose up -d
+        sleep 15  # Give Portainer more time to start
+        info "Portainer restarted"
+    else
+        info "Portainer remained running during backup"
+    fi
     
     # Start nginx-proxy-manager (reverse proxy) first as it's critical for accessing everything
     info "Starting nginx-proxy-manager (reverse proxy)..."
@@ -2871,31 +2864,30 @@ restore_enhanced_stacks() {
                         if [[ -n "$compose_content" && "$compose_content" != "null" && "$compose_content" != "" ]]; then
                             info "Redeploying stack via update API: $stack_name"
                             
-                            # Create update payload with compose content for reliable deployment (match Portainer UI format)
+                            # Create update payload with compose content for reliable deployment
                             local redeploy_payload
                             redeploy_payload=$(jq -n \
-                                --arg id "$stack_id" \
                                 --arg compose "$compose_content" \
                                 --argjson env "$env_vars" \
                                 '{
-                                    "id": ($id | tonumber),
-                                    "StackFileContent": $compose,
-                                    "Env": $env,
-                                    "Prune": false,
-                                    "PullImage": false
+                                    stackFileContent: $compose,
+                                    env: $env,
+                                    prune: false
                                 }')
                             
-                            # Update the stack using the same format as Portainer UI
+                            # Update the stack (this effectively redeploys it)
                             local redeploy_response
-                            redeploy_response=$(curl -s -X PUT "$PORTAINER_API_URL/stacks/$stack_id?endpointId=1" \
+                            redeploy_response=$(curl -s -X PUT "$PORTAINER_API_URL/stacks/$stack_id" \
                                 -H "Authorization: Bearer $jwt_token" \
                                 -H "Content-Type: application/json" \
                                 -d "$redeploy_payload")
                             
                             if echo "$redeploy_response" | grep -q "error\|Error" 2>/dev/null; then
-                                warn "Stack redeploy failed: $stack_name - error in response: $redeploy_response"
-                                # Log the response for debugging
-                                info "Redeploy response: $redeploy_response"
+                                warn "Stack redeploy failed: $stack_name - trying start API"
+                                # Fallback to start API if redeploy fails
+                                local start_response
+                                start_response=$(curl -s -X POST "$PORTAINER_API_URL/stacks/$stack_id/start" \
+                                    -H "Authorization: Bearer $jwt_token")
                             else
                                 info "Stack redeploy successful: $stack_name"
                             fi
@@ -3541,39 +3533,9 @@ restart_specific_stack() {
         stack_id=$(echo "$current_stacks" | jq -r ".[] | select(.Name == \"$stack_name\") | .Id")
         
         if [[ -n "$stack_id" && "$stack_id" != "null" ]]; then
-            # Stack exists, update and start it using the correct API endpoint
-            if [[ -n "$compose_content" && "$compose_content" != "null" ]]; then
-                info "Updating and starting existing stack: $stack_name (ID: $stack_id)"
-                
-                # Prepare the payload similar to what Portainer UI sends
-                local payload
-                payload=$(jq -n \
-                    --arg id "$stack_id" \
-                    --arg content "$compose_content" \
-                    --argjson env "$env_vars" \
-                    '{
-                        "id": ($id | tonumber),
-                        "StackFileContent": $content,
-                        "Env": $env,
-                        "Prune": false,
-                        "PullImage": false
-                    }')
-                
-                # Use PUT method to update and start the stack (same as Portainer UI)
-                local response
-                response=$(curl -s -X PUT -H "Authorization: Bearer $jwt_token" \
-                    -H "Content-Type: application/json" \
-                    "$PORTAINER_API_URL/stacks/$stack_id?endpointId=1" \
-                    -d "$payload")
-                
-                if [[ $? -eq 0 ]]; then
-                    info "Successfully updated and started stack: $stack_name"
-                else
-                    warn "Failed to update stack via API: $stack_name, response: $response"
-                fi
-            else
-                warn "No compose content available for stack: $stack_name, cannot restart"
-            fi
+            # Stack exists, start it
+            curl -s -X POST -H "Authorization: Bearer $jwt_token" \
+                "$PORTAINER_API_URL/stacks/$stack_id/start" >/dev/null 2>&1
         else
             # Stack doesn't exist, create it if we have compose content
             if [[ -n "$compose_content" && "$compose_content" != "null" ]]; then
