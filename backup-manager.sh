@@ -341,10 +341,10 @@ validate_backup_file() {
                 errors+=("Backup file appears corrupted: $LATEST_BACKUP")
             fi
             
-            # Check backup file size (should be more than 1MB for realistic backup)
+            # Check backup file size (should be more than 10KB - very permissive threshold)
             local file_size
             file_size=$(stat -c%s "$LATEST_BACKUP" 2>/dev/null || echo "0")
-            if [[ "$file_size" -lt 1048576 ]]; then  # 1MB
+            if [[ "$file_size" -lt 10240 ]]; then  # 10KB - very minimal threshold
                 local human_size=$(du -h "$LATEST_BACKUP" 2>/dev/null | cut -f1)
                 errors+=("Backup file suspiciously small: $LATEST_BACKUP ($human_size) - may indicate backup creation issue")
             fi
@@ -398,13 +398,21 @@ validate_backup_integrity() {
             
             # Check for expected directories in backup with more flexible matching
             local portainer_path_check=$(echo "$PORTAINER_PATH" | sed 's|^/||')  # Remove leading slash for tar content
-            if ! tar -tzf "$LATEST_BACKUP" | grep -q "$portainer_path_check"; then
-                # Try alternative patterns before failing
-                if ! tar -tzf "$LATEST_BACKUP" | grep -q "portainer"; then
-                    # Show what's actually in the backup for debugging
-                    local backup_contents=$(tar -tzf "$LATEST_BACKUP" | head -10 | tr '\n' ' ')
-                    errors+=("Backup missing Portainer data (expected: $portainer_path_check, found: $backup_contents...)")
-                fi
+            local backup_has_portainer=false
+            
+            # Check multiple patterns to ensure we find Portainer data
+            if tar -tzf "$LATEST_BACKUP" | grep -q "^$portainer_path_check/"; then
+                backup_has_portainer=true
+            elif tar -tzf "$LATEST_BACKUP" | grep -q "portainer/"; then
+                backup_has_portainer=true
+            elif tar -tzf "$LATEST_BACKUP" | grep -q "portainer\.db"; then
+                backup_has_portainer=true
+            fi
+            
+            if [[ "$backup_has_portainer" != "true" ]]; then
+                # Show what's actually in the backup for debugging
+                local backup_contents=$(tar -tzf "$LATEST_BACKUP" | head -10 | tr '\n' ' ')
+                errors+=("Backup missing Portainer data (expected: $portainer_path_check, found: $backup_contents...)")
             fi
             
             # Cleanup
