@@ -194,7 +194,7 @@ curl -X POST "http://localhost:9000/api/stacks/create/standalone/string?endpoint
 Update an existing stack configuration.
 
 ```bash
-curl -X PUT "http://localhost:9000/api/stacks/1" \
+curl -X PUT "http://localhost:9000/api/stacks/1?endpointId=1" \
   -H "Authorization: Bearer $JWT_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -204,7 +204,10 @@ curl -X PUT "http://localhost:9000/api/stacks/1" \
   }'
 ```
 
-**Key Parameters**:
+**Query Parameters**:
+- `endpointId`: Docker environment ID (required, usually 1 for local)
+
+**Payload Parameters**:
 - `StackFileContent`: Updated Docker Compose YAML
 - `Env`: Array of environment variables
 - `Prune`: Remove orphaned containers (boolean)

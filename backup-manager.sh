@@ -3146,9 +3146,9 @@ restore_enhanced_stacks() {
                                 prune: false
                             }')
                         
-                        # Update the stack
+                        # Update the stack (requires endpointId parameter)
                         local update_response
-                        update_response=$(curl -s -X PUT "$PORTAINER_API_URL/stacks/$stack_id" \
+                        update_response=$(curl -s -X PUT "$PORTAINER_API_URL/stacks/$stack_id?endpointId=1" \
                             -H "Authorization: Bearer $jwt_token" \
                             -H "Content-Type: application/json" \
                             -d "$update_payload")
@@ -3177,26 +3177,31 @@ restore_enhanced_stacks() {
                                     prune: false
                                 }')
                             
-                            # Update the stack (this effectively redeploys it)
+                            # Update the stack (this effectively redeploys it) - requires endpointId parameter
                             local redeploy_response
-                            redeploy_response=$(curl -s -X PUT "$PORTAINER_API_URL/stacks/$stack_id" \
+                            redeploy_response=$(curl -s -X PUT "$PORTAINER_API_URL/stacks/$stack_id?endpointId=1" \
                                 -H "Authorization: Bearer $jwt_token" \
                                 -H "Content-Type: application/json" \
                                 -d "$redeploy_payload")
                             
                             if echo "$redeploy_response" | grep -q "error\|Error" 2>/dev/null; then
                                 warn "Stack redeploy failed: $stack_name - trying start API"
-                                # Fallback to start API if redeploy fails
+                                # Fallback to start API if redeploy fails (requires endpointId parameter)
                                 local start_response
-                                start_response=$(curl -s -X POST "$PORTAINER_API_URL/stacks/$stack_id/start" \
+                                start_response=$(curl -s -X POST "$PORTAINER_API_URL/stacks/$stack_id/start?endpointId=1" \
                                     -H "Authorization: Bearer $jwt_token")
                             else
                                 info "Stack redeploy successful: $stack_name"
+                                # Explicitly start the stack after redeploy to ensure containers are running
+                                info "Starting stack after redeploy: $stack_name"
+                                local post_redeploy_start_response
+                                post_redeploy_start_response=$(curl -s -X POST "$PORTAINER_API_URL/stacks/$stack_id/start?endpointId=1" \
+                                    -H "Authorization: Bearer $jwt_token")
                             fi
                         else
-                            # No compose content available, try basic start
+                            # No compose content available, try basic start (requires endpointId parameter)
                             local start_response
-                            start_response=$(curl -s -X POST "$PORTAINER_API_URL/stacks/$stack_id/start" \
+                            start_response=$(curl -s -X POST "$PORTAINER_API_URL/stacks/$stack_id/start?endpointId=1" \
                                 -H "Authorization: Bearer $jwt_token")
                         fi
                         
