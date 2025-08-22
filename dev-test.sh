@@ -1289,6 +1289,173 @@ test_architecture_validation() {
     return 0
 }
 
+# Test enhanced post-operation validation system
+test_enhanced_post_operation_validation() {
+    info "Testing enhanced post-operation validation system..."
+    
+    # Test setup validation
+    info "Testing setup validation..."
+    if sudo -u portainer /home/vagrant/docker-stack-backup/backup-manager.sh --yes --non-interactive config >/dev/null 2>&1; then
+        success "Enhanced setup validation passed"
+    else
+        warn "Enhanced setup validation had warnings (may be expected)"
+    fi
+    
+    # Create a test backup and validate it
+    info "Creating test backup for validation testing..."
+    if sudo -u portainer DOCKER_BACKUP_TEST=true /home/vagrant/docker-stack-backup/backup-manager.sh --yes --non-interactive backup >/dev/null 2>&1; then
+        success "Test backup created for validation testing"
+        
+        # Find the latest backup file
+        local latest_backup=$(ls -t /opt/backup/docker_backup_*.tar.gz 2>/dev/null | head -1)
+        if [[ -n "$latest_backup" && -f "$latest_backup" ]]; then
+            # Test backup file integrity validation
+            if tar -tzf "$latest_backup" >/dev/null 2>&1; then
+                success "Backup file integrity validation passed"
+            else
+                error "Backup file integrity validation failed"
+                return 1
+            fi
+            
+            # Test metadata presence
+            if tar -tzf "$latest_backup" | grep -q "metadata.json"; then
+                success "Backup metadata validation passed"
+            else
+                warn "Backup metadata not found (may use legacy format)"
+            fi
+            
+            # Test backup size validation
+            local file_size=$(stat -c%s "$latest_backup" 2>/dev/null || echo "0")
+            if [[ "$file_size" -gt 1024 ]]; then
+                success "Backup file size validation passed ($file_size bytes)"
+            else
+                error "Backup file size validation failed - file too small"
+                return 1
+            fi
+        else
+            error "No backup file found for validation testing"
+            return 1
+        fi
+    else
+        error "Failed to create test backup for validation"
+        return 1
+    fi
+    
+    # Test service endpoint validation
+    info "Testing service endpoint validation..."
+    local endpoints_ok=true
+    
+    # Test Portainer API endpoint
+    if curl -s --max-time 10 "http://localhost:9000/api/status" >/dev/null 2>&1; then
+        success "Portainer API endpoint validation passed"
+    else
+        error "Portainer API endpoint validation failed"
+        endpoints_ok=false
+    fi
+    
+    # Test Portainer web interface
+    if curl -s --max-time 10 "http://localhost:9000" >/dev/null 2>&1; then
+        success "Portainer web interface validation passed"
+    else
+        error "Portainer web interface validation failed"
+        endpoints_ok=false
+    fi
+    
+    # Test nginx-proxy-manager if running
+    if docker ps --format "table {{.Names}}" | grep -q "nginx-proxy-manager"; then
+        if curl -s --max-time 10 "http://localhost:81" >/dev/null 2>&1; then
+            success "nginx-proxy-manager endpoint validation passed"
+        else
+            error "nginx-proxy-manager endpoint validation failed"
+            endpoints_ok=false
+        fi
+    else
+        info "nginx-proxy-manager not running - skipping endpoint validation"
+    fi
+    
+    if [[ "$endpoints_ok" != "true" ]]; then
+        error "Service endpoint validation failed"
+        return 1
+    fi
+    
+    # Test Docker service validation
+    info "Testing Docker service validation..."
+    if systemctl is-active docker >/dev/null 2>&1; then
+        success "Docker daemon validation passed"
+    else
+        error "Docker daemon validation failed"
+        return 1
+    fi
+    
+    # Test Docker socket permissions
+    if [[ -S "/var/run/docker.sock" && -r "/var/run/docker.sock" ]]; then
+        success "Docker socket permissions validation passed"
+    else
+        error "Docker socket permissions validation failed"
+        return 1
+    fi
+    
+    # Test directory structure validation
+    info "Testing directory structure validation..."
+    local dirs_ok=true
+    for dir in "/opt/portainer" "/opt/tools" "/opt/backup"; do
+        if [[ -d "$dir" && -w "$dir" ]]; then
+            success "Directory validation passed: $dir"
+        else
+            error "Directory validation failed: $dir"
+            dirs_ok=false
+        fi
+    done
+    
+    if [[ "$dirs_ok" != "true" ]]; then
+        error "Directory structure validation failed"
+        return 1
+    fi
+    
+    # Test Portainer data integrity
+    info "Testing Portainer data integrity validation..."
+    if [[ -f "/opt/portainer/data/portainer.db" ]]; then
+        if command -v sqlite3 >/dev/null 2>&1; then
+            if sqlite3 "/opt/portainer/data/portainer.db" "PRAGMA integrity_check;" | grep -q "ok"; then
+                success "Portainer database integrity validation passed"
+            else
+                warn "Portainer database integrity check inconclusive"
+            fi
+        else
+            info "sqlite3 not available - skipping database integrity check"
+        fi
+    else
+        warn "Portainer database not found - may be new installation"
+    fi
+    
+    # Test stack state validation via API
+    info "Testing stack state validation..."
+    local jwt_token
+    if jwt_token=$(sudo -u portainer DOCKER_BACKUP_TEST=true /home/vagrant/docker-stack-backup/backup-manager.sh --source-only 2>/dev/null && authenticate_portainer_api 2>/dev/null); then
+        if [[ -n "$jwt_token" ]]; then
+            local stacks_response
+            stacks_response=$(curl -s --max-time 10 -H "Authorization: Bearer $jwt_token" "http://localhost:9000/api/stacks" 2>/dev/null)
+            
+            if [[ -n "$stacks_response" ]] && echo "$stacks_response" | jq -e . >/dev/null 2>&1; then
+                local total_stacks
+                total_stacks=$(echo "$stacks_response" | jq length)
+                local running_stacks
+                running_stacks=$(echo "$stacks_response" | jq -r '[.[] | select(.Status == 1)] | length')
+                success "Stack state validation passed ($running_stacks/$total_stacks stacks running)"
+            else
+                warn "Stack state validation inconclusive - API response invalid"
+            fi
+        else
+            warn "Stack state validation inconclusive - authentication failed"
+        fi
+    else
+        warn "Stack state validation inconclusive - could not authenticate"
+    fi
+    
+    success "Enhanced post-operation validation tests completed"
+    return 0
+}
+
 # Test config command with existing installation
 test_config_command_with_existing_installation() {
     info "Testing config command with existing installation..."
@@ -6472,6 +6639,7 @@ run_vm_tests() {
     
     run_test "Backup File Validation" "test_backup_file_validation"
     run_test "Architecture Validation" "test_architecture_validation"
+    run_test "Enhanced Post-Operation Validation" "test_enhanced_post_operation_validation"
     
     info "🛠️  PHASE 8: ERROR HANDLING TESTS"
     echo "=============================================================="

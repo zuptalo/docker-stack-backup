@@ -191,60 +191,345 @@ validate_system_state() {
     
     case "$operation" in
         "setup")
-            # Validate Docker is running
-            if ! systemctl is-active docker >/dev/null 2>&1; then
-                validation_errors+=("Docker daemon is not running")
-            fi
-            
-            # Validate Portainer is accessible
-            if ! curl -s -f "http://localhost:9000" >/dev/null 2>&1; then
-                validation_errors+=("Portainer is not accessible on port 9000")
-            fi
-            
-            # Validate required directories exist
-            for dir in "$PORTAINER_PATH" "$TOOLS_PATH" "$BACKUP_PATH"; do
-                if [[ -n "$dir" && ! -d "$dir" ]]; then
-                    validation_errors+=("Required directory does not exist: $dir")
-                fi
-            done
+            # Enhanced setup validation
+            validation_errors+=($(validate_docker_service))
+            validation_errors+=($(validate_portainer_service))
+            validation_errors+=($(validate_directory_structure))
+            validation_errors+=($(validate_service_endpoints))
             ;;
         "backup")
-            # Validate backup file was created
-            if [[ -n "${LATEST_BACKUP:-}" && ! -f "$LATEST_BACKUP" ]]; then
-                validation_errors+=("Backup file was not created: $LATEST_BACKUP")
-            fi
-            
-            # Validate services are running after backup
-            if ! curl -s -f "http://localhost:9000" >/dev/null 2>&1; then
-                validation_errors+=("Portainer is not accessible after backup")
-            fi
+            # Enhanced backup validation
+            validation_errors+=($(validate_backup_file))
+            validation_errors+=($(validate_services_post_backup))
+            validation_errors+=($(validate_backup_integrity))
             ;;
         "restore")
-            # Validate services are running after restore
-            if ! curl -s -f "http://localhost:9000" >/dev/null 2>&1; then
-                validation_errors+=("Portainer is not accessible after restore")
-            fi
-            
-            # Validate data directories exist
-            for dir in "$PORTAINER_PATH" "$TOOLS_PATH"; do
-                if [[ -n "$dir" && ! -d "$dir" ]]; then
-                    validation_errors+=("Required directory missing after restore: $dir")
-                fi
-            done
+            # Enhanced restore validation
+            validation_errors+=($(validate_services_post_restore))
+            validation_errors+=($(validate_data_integrity))
+            validation_errors+=($(validate_stack_states))
+            ;;
+        "config")
+            # Enhanced configuration validation
+            validation_errors+=($(validate_configuration_changes))
+            validation_errors+=($(validate_service_accessibility))
             ;;
     esac
     
     # Report validation results
     if [[ ${#validation_errors[@]} -eq 0 ]]; then
-        success "System validation passed for $operation"
+        success "Enhanced system validation passed for $operation"
         return 0
     else
-        error "System validation failed for $operation:"
+        error "Enhanced system validation failed for $operation:"
         for error in "${validation_errors[@]}"; do
-            error "  - $error"
+            if [[ -n "$error" ]]; then
+                error "  - $error"
+            fi
         done
         return 1
     fi
+}
+
+# Enhanced validation functions for detailed system checks
+validate_docker_service() {
+    local errors=()
+    
+    # Check Docker daemon
+    if ! systemctl is-active docker >/dev/null 2>&1; then
+        errors+=("Docker daemon is not running")
+    fi
+    
+    # Check Docker socket permissions
+    if [[ ! -S "/var/run/docker.sock" ]]; then
+        errors+=("Docker socket not available")
+    elif [[ ! -r "/var/run/docker.sock" ]]; then
+        errors+=("Docker socket not readable - check user permissions")
+    fi
+    
+    # Check Docker version compatibility
+    if command -v docker >/dev/null 2>&1; then
+        local docker_version
+        docker_version=$(docker --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+' | head -1)
+        if [[ -n "$docker_version" ]]; then
+            local major_version=${docker_version%%.*}
+            if [[ "$major_version" -lt 20 ]]; then
+                errors+=("Docker version $docker_version may be too old (recommend 20+)")
+            fi
+        fi
+    fi
+    
+    printf '%s\n' "${errors[@]}"
+}
+
+validate_portainer_service() {
+    local errors=()
+    
+    # Check Portainer container is running
+    if ! docker ps --format "table {{.Names}}" | grep -q "^portainer$"; then
+        errors+=("Portainer container is not running")
+    fi
+    
+    # Check Portainer API accessibility
+    if ! curl -s --max-time 10 "http://localhost:9000/api/status" >/dev/null 2>&1; then
+        errors+=("Portainer API is not accessible on port 9000")
+    fi
+    
+    # Check Portainer authentication
+    if [[ -f "${PORTAINER_PATH}/.credentials" ]]; then
+        local jwt_token
+        jwt_token=$(authenticate_portainer_api)
+        if [[ -z "$jwt_token" ]]; then
+            errors+=("Portainer API authentication failed")
+        fi
+    fi
+    
+    printf '%s\n' "${errors[@]}"
+}
+
+validate_directory_structure() {
+    local errors=()
+    
+    # Check required directories exist and have correct permissions
+    for dir in "$PORTAINER_PATH" "$TOOLS_PATH" "$BACKUP_PATH"; do
+        if [[ -n "$dir" ]]; then
+            if [[ ! -d "$dir" ]]; then
+                errors+=("Required directory does not exist: $dir")
+            elif [[ ! -w "$dir" ]]; then
+                errors+=("Required directory is not writable: $dir")
+            fi
+        fi
+    done
+    
+    # Check critical subdirectories
+    if [[ -d "$PORTAINER_PATH" ]]; then
+        if [[ ! -d "$PORTAINER_PATH/data" ]]; then
+            errors+=("Portainer data directory missing: $PORTAINER_PATH/data")
+        fi
+    fi
+    
+    printf '%s\n' "${errors[@]}"
+}
+
+validate_service_endpoints() {
+    local errors=()
+    
+    # Check Portainer web interface
+    if ! curl -s --max-time 10 "http://localhost:9000" >/dev/null 2>&1; then
+        errors+=("Portainer web interface not accessible")
+    fi
+    
+    # Check nginx-proxy-manager if it should be running
+    if docker ps --format "table {{.Names}}" | grep -q "nginx-proxy-manager"; then
+        if ! curl -s --max-time 10 "http://localhost:81" >/dev/null 2>&1; then
+            errors+=("nginx-proxy-manager web interface not accessible")
+        fi
+    fi
+    
+    printf '%s\n' "${errors[@]}"
+}
+
+validate_backup_file() {
+    local errors=()
+    
+    if [[ -n "${LATEST_BACKUP:-}" ]]; then
+        if [[ ! -f "$LATEST_BACKUP" ]]; then
+            errors+=("Backup file was not created: $LATEST_BACKUP")
+        else
+            # Check backup file integrity
+            if ! tar -tzf "$LATEST_BACKUP" >/dev/null 2>&1; then
+                errors+=("Backup file appears corrupted: $LATEST_BACKUP")
+            fi
+            
+            # Check backup file size (should be more than 1KB)
+            local file_size
+            file_size=$(stat -c%s "$LATEST_BACKUP" 2>/dev/null || echo "0")
+            if [[ "$file_size" -lt 1024 ]]; then
+                errors+=("Backup file suspiciously small: $LATEST_BACKUP ($file_size bytes)")
+            fi
+        fi
+    fi
+    
+    printf '%s\n' "${errors[@]}"
+}
+
+validate_services_post_backup() {
+    local errors=()
+    
+    # Verify all expected services are running after backup
+    if ! curl -s --max-time 10 "http://localhost:9000/api/status" >/dev/null 2>&1; then
+        errors+=("Portainer API not accessible after backup")
+    fi
+    
+    # Check that stacks are in expected state
+    local jwt_token
+    jwt_token=$(authenticate_portainer_api 2>/dev/null)
+    if [[ -n "$jwt_token" ]]; then
+        local stacks_response
+        stacks_response=$(curl -s --max-time 10 -H "Authorization: Bearer $jwt_token" \
+            "http://localhost:9000/api/stacks" 2>/dev/null)
+        
+        if [[ -z "$stacks_response" ]] || ! echo "$stacks_response" | jq -e . >/dev/null 2>&1; then
+            errors+=("Unable to verify stack states after backup")
+        fi
+    fi
+    
+    printf '%s\n' "${errors[@]}"
+}
+
+validate_backup_integrity() {
+    local errors=()
+    
+    if [[ -n "${LATEST_BACKUP:-}" && -f "$LATEST_BACKUP" ]]; then
+        # Extract and verify key files exist in backup
+        local temp_check_dir="/tmp/backup_integrity_check_$$"
+        if mkdir -p "$temp_check_dir" 2>/dev/null; then
+            if tar -tzf "$LATEST_BACKUP" | grep -q "metadata.json"; then
+                # Verify metadata structure
+                if tar -xzf "$LATEST_BACKUP" -C "$temp_check_dir" metadata.json 2>/dev/null; then
+                    if ! jq -e '.backup_info.created_at' "$temp_check_dir/metadata.json" >/dev/null 2>&1; then
+                        errors+=("Backup metadata structure is invalid")
+                    fi
+                fi
+            else
+                errors+=("Backup missing metadata file")
+            fi
+            
+            # Check for expected directories in backup
+            if ! tar -tzf "$LATEST_BACKUP" | grep -q "opt/portainer/"; then
+                errors+=("Backup missing Portainer data")
+            fi
+            
+            # Cleanup
+            rm -rf "$temp_check_dir" 2>/dev/null
+        fi
+    fi
+    
+    printf '%s\n' "${errors[@]}"
+}
+
+validate_services_post_restore() {
+    local errors=()
+    
+    # Wait a moment for services to stabilize after restore
+    sleep 5
+    
+    # Check core services
+    if ! curl -s --max-time 15 "http://localhost:9000/api/status" >/dev/null 2>&1; then
+        errors+=("Portainer API not accessible after restore")
+    fi
+    
+    # Verify containers are running
+    local expected_containers=("portainer")
+    for container in "${expected_containers[@]}"; do
+        if ! docker ps --format "table {{.Names}}" | grep -q "^${container}$"; then
+            errors+=("Expected container not running after restore: $container")
+        fi
+    done
+    
+    printf '%s\n' "${errors[@]}"
+}
+
+validate_data_integrity() {
+    local errors=()
+    
+    # Check data directories exist and contain expected content
+    for dir in "$PORTAINER_PATH" "$TOOLS_PATH"; do
+        if [[ -n "$dir" && ! -d "$dir" ]]; then
+            errors+=("Required directory missing after restore: $dir")
+        fi
+    done
+    
+    # Check Portainer database exists
+    if [[ -f "$PORTAINER_PATH/data/portainer.db" ]]; then
+        # Basic SQLite integrity check
+        if command -v sqlite3 >/dev/null 2>&1; then
+            if ! sqlite3 "$PORTAINER_PATH/data/portainer.db" "PRAGMA integrity_check;" >/dev/null 2>&1; then
+                errors+=("Portainer database integrity check failed")
+            fi
+        fi
+    else
+        errors+=("Portainer database missing after restore")
+    fi
+    
+    printf '%s\n' "${errors[@]}"
+}
+
+validate_stack_states() {
+    local errors=()
+    
+    # Authenticate and check stack states
+    local jwt_token
+    jwt_token=$(authenticate_portainer_api 2>/dev/null)
+    if [[ -n "$jwt_token" ]]; then
+        local stacks_response
+        stacks_response=$(curl -s --max-time 15 -H "Authorization: Bearer $jwt_token" \
+            "http://localhost:9000/api/stacks" 2>/dev/null)
+        
+        if [[ -n "$stacks_response" ]] && echo "$stacks_response" | jq -e . >/dev/null 2>&1; then
+            # Check for any error states
+            local error_stacks
+            error_stacks=$(echo "$stacks_response" | jq -r '[.[] | select(.Status == 3 or .Status == 4) | .Name] | join(", ")')
+            if [[ -n "$error_stacks" ]]; then
+                errors+=("Stacks in error state after restore: $error_stacks")
+            fi
+            
+            # Verify expected stacks are present (at least one should exist after restore)
+            local total_stacks
+            total_stacks=$(echo "$stacks_response" | jq length)
+            if [[ "$total_stacks" -eq 0 ]]; then
+                errors+=("No stacks found after restore - data may not have been restored correctly")
+            fi
+        else
+            errors+=("Unable to verify stack states after restore - API may be unavailable")
+        fi
+    else
+        errors+=("Cannot authenticate with Portainer API to verify stack states")
+    fi
+    
+    printf '%s\n' "${errors[@]}"
+}
+
+validate_configuration_changes() {
+    local errors=()
+    
+    # Verify configuration file exists and is readable
+    if [[ -f "/etc/docker-backup-manager.conf" ]]; then
+        if ! source "/etc/docker-backup-manager.conf" 2>/dev/null; then
+            errors+=("Configuration file has syntax errors")
+        fi
+    fi
+    
+    # Verify configured paths exist
+    for dir in "$PORTAINER_PATH" "$TOOLS_PATH" "$BACKUP_PATH"; do
+        if [[ -n "$dir" && ! -d "$dir" ]]; then
+            errors+=("Configured directory does not exist: $dir")
+        fi
+    done
+    
+    printf '%s\n' "${errors[@]}"
+}
+
+validate_service_accessibility() {
+    local errors=()
+    
+    # Comprehensive service accessibility check
+    if ! curl -s --max-time 10 "http://localhost:9000" >/dev/null 2>&1; then
+        errors+=("Portainer web interface not accessible after configuration")
+    fi
+    
+    if ! curl -s --max-time 10 "http://localhost:9000/api/status" >/dev/null 2>&1; then
+        errors+=("Portainer API not accessible after configuration")
+    fi
+    
+    # Check nginx-proxy-manager if it exists
+    if docker ps --format "table {{.Names}}" | grep -q "nginx-proxy-manager"; then
+        if ! curl -s --max-time 10 "http://localhost:81" >/dev/null 2>&1; then
+            errors+=("nginx-proxy-manager not accessible after configuration")
+        fi
+    fi
+    
+    printf '%s\n' "${errors[@]}"
 }
 
 # Create operation lock to prevent concurrent operations
