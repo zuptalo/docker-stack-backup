@@ -3794,6 +3794,356 @@ EOF
     return 0
 }
 
+# Comprehensive snapshot restore test: backup A (2 stacks) → add stack → restore A → verify only 2 stacks remain
+test_comprehensive_snapshot_restore_scenario_a() {
+    info "Testing comprehensive snapshot restore scenario A: 2 stacks → add stack → restore → verify 2 stacks..."
+    
+    # Skip this test if we can't access Portainer API
+    if ! curl -s "http://localhost:9000" >/dev/null 2>&1; then
+        warn "Portainer not accessible, skipping comprehensive snapshot restore scenario A"
+        return 0
+    fi
+    
+    # Create a temporary test script
+    local test_script="/tmp/test_comprehensive_scenario_a.sh"
+    cat > "$test_script" << 'EOF'
+#!/bin/bash
+set -euo pipefail
+export DOCKER_BACKUP_TEST=true
+source /home/vagrant/docker-stack-backup/backup-manager.sh
+
+info "🧪 Comprehensive Snapshot Restore Scenario A Test"
+info "Phase 1: Setting up initial state with nginx-proxy-manager"
+
+# Ensure we have nginx-proxy-manager running (this is our base stack)
+if ! sudo -u portainer docker ps --format "{{.Names}}" | grep -q "nginx-proxy-manager"; then
+    warn "nginx-proxy-manager not running, attempting to start it"
+    cd /opt/tools/nginx-proxy-manager
+    sudo -u portainer docker compose up -d
+    sleep 10
+fi
+
+info "Phase 2: Creating backup A with current stacks (should be 1: nginx-proxy-manager)"
+
+# Create backup A
+backup_a_output=$(echo "backup_a_$(date +%s)" | sudo -u portainer DOCKER_BACKUP_TEST=true /home/vagrant/docker-stack-backup/backup-manager.sh backup 2>&1)
+backup_a_file=$(echo "$backup_a_output" | grep "docker_backup_" | grep -o "docker_backup_[0-9]*_[0-9]*.tar.gz" | tail -1)
+
+if [[ -z "$backup_a_file" ]]; then
+    error "Failed to create backup A"
+    exit 1
+fi
+
+info "Backup A created: $backup_a_file"
+
+# Verify backup A contains the expected stack
+if tar -tf "/opt/backup/$backup_a_file" | grep -q "stack_states.json"; then
+    tar -xf "/opt/backup/$backup_a_file" -C /tmp stack_states.json
+    backup_a_stacks=$(jq -r '.stacks[].name' /tmp/stack_states.json)
+    info "Backup A contains stacks: $backup_a_stacks"
+    rm -f /tmp/stack_states.json
+else
+    warn "Backup A does not contain stack_states.json"
+fi
+
+info "Phase 3: Adding an extra test stack"
+
+# Create a simple test stack
+test_stack_dir="/opt/tools/test-stack"
+sudo mkdir -p "$test_stack_dir"
+cat > /tmp/test-compose.yml << 'COMPOSE'
+version: '3'
+services:
+  test-service:
+    image: nginx:alpine
+    container_name: test-stack-service
+    restart: unless-stopped
+    networks:
+      - prod-network
+networks:
+  prod-network:
+    external: true
+COMPOSE
+
+sudo mv /tmp/test-compose.yml "$test_stack_dir/docker-compose.yml"
+sudo chown -R portainer:portainer "$test_stack_dir"
+
+# Deploy the test stack via docker compose (simulating user adding a stack)
+cd "$test_stack_dir"
+sudo -u portainer docker compose up -d
+sleep 5
+
+# Verify the test stack is running
+if sudo -u portainer docker ps --format "{{.Names}}" | grep -q "test-stack-service"; then
+    info "✅ Test stack deployed successfully"
+else
+    error "❌ Failed to deploy test stack"
+    exit 1
+fi
+
+info "Current stacks after adding test stack:"
+sudo -u portainer docker ps --format "table {{.Names}}\t{{.Status}}"
+
+info "Phase 4: Restoring backup A (should remove the extra test stack)"
+
+# Find the backup file number in the list
+backup_list=$(ls -1t /opt/backup/docker_backup_*.tar.gz)
+backup_number=1
+for backup in $backup_list; do
+    if [[ "$(basename "$backup")" == "$backup_a_file" ]]; then
+        break
+    fi
+    backup_number=$((backup_number + 1))
+done
+
+info "Backup A is number $backup_number in the list"
+
+# Restore backup A
+restore_output=$(echo -e "$backup_number\ny" | sudo -u portainer DOCKER_BACKUP_TEST=true /home/vagrant/docker-stack-backup/backup-manager.sh restore 2>&1)
+
+info "Phase 5: Verifying snapshot restore results"
+
+# Wait for restoration to complete
+sleep 15
+
+# Check that test-stack-service was removed
+if sudo -u portainer docker ps --format "{{.Names}}" | grep -q "test-stack-service"; then
+    error "❌ Test stack was NOT removed - snapshot restore failed!"
+    exit 1
+else
+    info "✅ Extra test stack was properly removed"
+fi
+
+# Check that nginx-proxy-manager is still running
+if sudo -u portainer docker ps --format "{{.Names}}" | grep -q "nginx-proxy-manager"; then
+    info "✅ nginx-proxy-manager is still running (preserved from backup)"
+else
+    error "❌ nginx-proxy-manager was removed - backup restoration failed!"
+    exit 1
+fi
+
+info "Final state verification:"
+final_stacks=$(sudo -u portainer docker ps --format "{{.Names}}" | grep -v "^portainer$" || echo "No non-Portainer containers")
+info "Running stacks after restore: $final_stacks"
+
+info "✅ Comprehensive Snapshot Restore Scenario A completed successfully!"
+echo "SUCCESS"
+EOF
+
+    chmod +x "$test_script"
+    
+    local result
+    if result=$(timeout 120 "$test_script" 2>&1); then
+        if echo "$result" | grep -q "SUCCESS"; then
+            success "Comprehensive snapshot restore scenario A passed"
+        else
+            error "Comprehensive snapshot restore scenario A failed - no SUCCESS marker"
+            echo "$result" | tail -20
+            rm -f "$test_script"
+            return 1
+        fi
+    else
+        error "Comprehensive snapshot restore scenario A failed or timed out"
+        echo "$result" | tail -20
+        rm -f "$test_script"
+        return 1
+    fi
+    
+    rm -f "$test_script"
+    return 0
+}
+
+# Comprehensive snapshot restore test: backup B (3 stacks) → remove stack → restore B → verify 3 stacks restored
+test_comprehensive_snapshot_restore_scenario_b() {
+    info "Testing comprehensive snapshot restore scenario B: 3 stacks → remove stack → restore → verify 3 stacks..."
+    
+    # Skip this test if we can't access Portainer API
+    if ! curl -s "http://localhost:9000" >/dev/null 2>&1; then
+        warn "Portainer not accessible, skipping comprehensive snapshot restore scenario B"
+        return 0
+    fi
+    
+    # Create a temporary test script
+    local test_script="/tmp/test_comprehensive_scenario_b.sh"
+    cat > "$test_script" << 'EOF'
+#!/bin/bash
+set -euo pipefail
+export DOCKER_BACKUP_TEST=true
+source /home/vagrant/docker-stack-backup/backup-manager.sh
+
+info "🧪 Comprehensive Snapshot Restore Scenario B Test"
+info "Phase 1: Setting up initial state with 3 stacks"
+
+# Ensure nginx-proxy-manager is running
+if ! sudo -u portainer docker ps --format "{{.Names}}" | grep -q "nginx-proxy-manager"; then
+    warn "nginx-proxy-manager not running, attempting to start it"
+    cd /opt/tools/nginx-proxy-manager
+    sudo -u portainer docker compose up -d
+    sleep 10
+fi
+
+# Create test stack 1
+test_stack1_dir="/opt/tools/test-stack1"
+sudo mkdir -p "$test_stack1_dir"
+cat > /tmp/test-compose1.yml << 'COMPOSE1'
+version: '3'
+services:
+  test1-service:
+    image: nginx:alpine
+    container_name: test-stack1-service
+    restart: unless-stopped
+    networks:
+      - prod-network
+networks:
+  prod-network:
+    external: true
+COMPOSE1
+
+sudo mv /tmp/test-compose1.yml "$test_stack1_dir/docker-compose.yml"
+sudo chown -R portainer:portainer "$test_stack1_dir"
+cd "$test_stack1_dir"
+sudo -u portainer docker compose up -d
+sleep 3
+
+# Create test stack 2
+test_stack2_dir="/opt/tools/test-stack2"
+sudo mkdir -p "$test_stack2_dir"
+cat > /tmp/test-compose2.yml << 'COMPOSE2'
+version: '3'
+services:
+  test2-service:
+    image: nginx:alpine
+    container_name: test-stack2-service
+    restart: unless-stopped
+    networks:
+      - prod-network
+networks:
+  prod-network:
+    external: true
+COMPOSE2
+
+sudo mv /tmp/test-compose2.yml "$test_stack2_dir/docker-compose.yml"
+sudo chown -R portainer:portainer "$test_stack2_dir"
+cd "$test_stack2_dir"
+sudo -u portainer docker compose up -d
+sleep 3
+
+info "Phase 2: Verifying 3 stacks are running"
+current_stacks=$(sudo -u portainer docker ps --format "{{.Names}}" | grep -v "^portainer$" | wc -l)
+info "Current non-Portainer containers: $current_stacks"
+
+if [[ $current_stacks -lt 3 ]]; then
+    warn "Expected at least 3 containers, but found $current_stacks"
+fi
+
+info "Phase 3: Creating backup B with 3 stacks"
+
+# Create backup B
+backup_b_output=$(echo "backup_b_$(date +%s)" | sudo -u portainer DOCKER_BACKUP_TEST=true /home/vagrant/docker-stack-backup/backup-manager.sh backup 2>&1)
+backup_b_file=$(echo "$backup_b_output" | grep "docker_backup_" | grep -o "docker_backup_[0-9]*_[0-9]*.tar.gz" | tail -1)
+
+if [[ -z "$backup_b_file" ]]; then
+    error "Failed to create backup B"
+    exit 1
+fi
+
+info "Backup B created: $backup_b_file"
+
+info "Phase 4: Removing one stack (test-stack2)"
+cd "$test_stack2_dir"
+sudo -u portainer docker compose down
+sudo rm -rf "$test_stack2_dir"
+
+# Verify stack was removed
+if sudo -u portainer docker ps --format "{{.Names}}" | grep -q "test-stack2-service"; then
+    error "Failed to remove test-stack2"
+    exit 1
+else
+    info "✅ test-stack2 successfully removed"
+fi
+
+info "Phase 5: Restoring backup B (should restore all 3 stacks)"
+
+# Find the backup file number in the list
+backup_list=$(ls -1t /opt/backup/docker_backup_*.tar.gz)
+backup_number=1
+for backup in $backup_list; do
+    if [[ "$(basename "$backup")" == "$backup_b_file" ]]; then
+        break
+    fi
+    backup_number=$((backup_number + 1))
+done
+
+info "Backup B is number $backup_number in the list"
+
+# Restore backup B
+restore_output=$(echo -e "$backup_number\ny" | sudo -u portainer DOCKER_BACKUP_TEST=true /home/vagrant/docker-stack-backup/backup-manager.sh restore 2>&1)
+
+info "Phase 6: Verifying snapshot restore results"
+
+# Wait for restoration to complete
+sleep 15
+
+# Check that all 3 stacks are running
+final_containers=$(sudo -u portainer docker ps --format "{{.Names}}" | grep -v "^portainer$" | wc -l)
+info "Final non-Portainer containers after restore: $final_containers"
+
+if [[ $final_containers -lt 3 ]]; then
+    error "❌ Expected at least 3 containers after restore, but found $final_containers"
+    exit 1
+else
+    info "✅ All expected containers were restored"
+fi
+
+# Verify specific containers
+if sudo -u portainer docker ps --format "{{.Names}}" | grep -q "nginx-proxy-manager"; then
+    info "✅ nginx-proxy-manager is running"
+else
+    error "❌ nginx-proxy-manager is missing"
+    exit 1
+fi
+
+if sudo -u portainer docker ps --format "{{.Names}}" | grep -q "test-stack1-service"; then
+    info "✅ test-stack1-service is running"
+else
+    error "❌ test-stack1-service is missing"
+    exit 1
+fi
+
+if sudo -u portainer docker ps --format "{{.Names}}" | grep -q "test-stack2-service"; then
+    info "✅ test-stack2-service was restored"
+else
+    error "❌ test-stack2-service was not restored"
+    exit 1
+fi
+
+info "✅ Comprehensive Snapshot Restore Scenario B completed successfully!"
+echo "SUCCESS"
+EOF
+
+    chmod +x "$test_script"
+    
+    local result
+    if result=$(timeout 180 "$test_script" 2>&1); then
+        if echo "$result" | grep -q "SUCCESS"; then
+            success "Comprehensive snapshot restore scenario B passed"
+        else
+            error "Comprehensive snapshot restore scenario B failed - no SUCCESS marker"
+            echo "$result" | tail -20
+            rm -f "$test_script"
+            return 1
+        fi
+    else
+        error "Comprehensive snapshot restore scenario B failed or timed out"
+        echo "$result" | tail -20
+        rm -f "$test_script"
+        return 1
+    fi
+    
+    rm -f "$test_script"
+    return 0
+}
+
 # Test Portainer restart functionality after restore
 test_portainer_restart_functionality() {
     info "Testing Portainer restart functionality after restore..."
@@ -6100,6 +6450,8 @@ run_vm_tests() {
     run_test "Restore with Stack State" "test_restore_with_stack_state"
     run_test "Snapshot Restore - Remove Extra Stacks" "test_snapshot_restore_remove_extra_stacks"
     run_test "Snapshot Restore - Add Missing Stacks" "test_snapshot_restore_add_missing_stacks"
+    run_test "Comprehensive Snapshot Restore Scenario A" "test_comprehensive_snapshot_restore_scenario_a"
+    run_test "Comprehensive Snapshot Restore Scenario B" "test_comprehensive_snapshot_restore_scenario_b"
     run_test "Portainer Restart After Restore" "test_portainer_restart_functionality"
     run_test "Fallback Stack Restoration" "test_fallback_stack_restoration"
     run_test "Orphaned Stack Cleanup" "test_orphaned_stack_cleanup"
