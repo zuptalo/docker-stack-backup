@@ -2871,30 +2871,31 @@ restore_enhanced_stacks() {
                         if [[ -n "$compose_content" && "$compose_content" != "null" && "$compose_content" != "" ]]; then
                             info "Redeploying stack via update API: $stack_name"
                             
-                            # Create update payload with compose content for reliable deployment
+                            # Create update payload with compose content for reliable deployment (match Portainer UI format)
                             local redeploy_payload
                             redeploy_payload=$(jq -n \
+                                --arg id "$stack_id" \
                                 --arg compose "$compose_content" \
                                 --argjson env "$env_vars" \
                                 '{
-                                    stackFileContent: $compose,
-                                    env: $env,
-                                    prune: false
+                                    "id": ($id | tonumber),
+                                    "StackFileContent": $compose,
+                                    "Env": $env,
+                                    "Prune": false,
+                                    "PullImage": false
                                 }')
                             
-                            # Update the stack (this effectively redeploys it)
+                            # Update the stack using the same format as Portainer UI
                             local redeploy_response
-                            redeploy_response=$(curl -s -X PUT "$PORTAINER_API_URL/stacks/$stack_id" \
+                            redeploy_response=$(curl -s -X PUT "$PORTAINER_API_URL/stacks/$stack_id?endpointId=1" \
                                 -H "Authorization: Bearer $jwt_token" \
                                 -H "Content-Type: application/json" \
                                 -d "$redeploy_payload")
                             
                             if echo "$redeploy_response" | grep -q "error\|Error" 2>/dev/null; then
-                                warn "Stack redeploy failed: $stack_name - trying start API"
-                                # Fallback to start API if redeploy fails
-                                local start_response
-                                start_response=$(curl -s -X POST "$PORTAINER_API_URL/stacks/$stack_id/start" \
-                                    -H "Authorization: Bearer $jwt_token")
+                                warn "Stack redeploy failed: $stack_name - error in response: $redeploy_response"
+                                # Log the response for debugging
+                                info "Redeploy response: $redeploy_response"
                             else
                                 info "Stack redeploy successful: $stack_name"
                             fi
@@ -3540,9 +3541,39 @@ restart_specific_stack() {
         stack_id=$(echo "$current_stacks" | jq -r ".[] | select(.Name == \"$stack_name\") | .Id")
         
         if [[ -n "$stack_id" && "$stack_id" != "null" ]]; then
-            # Stack exists, start it
-            curl -s -X POST -H "Authorization: Bearer $jwt_token" \
-                "$PORTAINER_API_URL/stacks/$stack_id/start" >/dev/null 2>&1
+            # Stack exists, update and start it using the correct API endpoint
+            if [[ -n "$compose_content" && "$compose_content" != "null" ]]; then
+                info "Updating and starting existing stack: $stack_name (ID: $stack_id)"
+                
+                # Prepare the payload similar to what Portainer UI sends
+                local payload
+                payload=$(jq -n \
+                    --arg id "$stack_id" \
+                    --arg content "$compose_content" \
+                    --argjson env "$env_vars" \
+                    '{
+                        "id": ($id | tonumber),
+                        "StackFileContent": $content,
+                        "Env": $env,
+                        "Prune": false,
+                        "PullImage": false
+                    }')
+                
+                # Use PUT method to update and start the stack (same as Portainer UI)
+                local response
+                response=$(curl -s -X PUT -H "Authorization: Bearer $jwt_token" \
+                    -H "Content-Type: application/json" \
+                    "$PORTAINER_API_URL/stacks/$stack_id?endpointId=1" \
+                    -d "$payload")
+                
+                if [[ $? -eq 0 ]]; then
+                    info "Successfully updated and started stack: $stack_name"
+                else
+                    warn "Failed to update stack via API: $stack_name, response: $response"
+                fi
+            else
+                warn "No compose content available for stack: $stack_name, cannot restart"
+            fi
         else
             # Stack doesn't exist, create it if we have compose content
             if [[ -n "$compose_content" && "$compose_content" != "null" ]]; then
