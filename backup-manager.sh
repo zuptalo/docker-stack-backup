@@ -3518,7 +3518,7 @@ restore_enhanced_stacks() {
                         # Verify the stack is actually running using Portainer Docker API (same as Portainer UI)
                         local containers_running=false
                         local retries=0
-                        local max_retries=10  # Increased retries for API-only approach with longer waits
+                        local max_retries=6  # Reasonable retry count - most stacks start within 60s
                         
                         while [[ $retries -lt $max_retries ]]; do
                             info "Attempt $((retries + 1))/$max_retries: Verifying stack $stack_name via Portainer Docker API"
@@ -3532,15 +3532,11 @@ restore_enhanced_stacks() {
                                 info "Stack $stack_name not yet running, waiting..."
                             fi
                             
-                            # API-only approach as requested - no fallbacks to direct docker commands
-                            # Allow more time for containers with health checks to start properly
-                            if [[ $retries -ge 2 ]]; then
-                                info "Waiting longer for containers with health checks to start properly..."
-                                sleep 15  # Extended wait for slow-starting containers
-                            fi
-                            
                             retries=$((retries + 1))
-                            sleep 8  # Increased wait between retries for API-only approach
+                            # Reasonable wait times - most containers start quickly
+                            if [[ $retries -lt $max_retries ]]; then
+                                sleep 10  # 10s between attempts = max 60s total wait
+                            fi
                         done
                         
                         if [[ "$containers_running" == "true" ]]; then
@@ -4759,8 +4755,8 @@ create_backup() {
     # Start containers again
     start_containers
     
-    # Restart stacks that were running before backup
-    restart_stacks "$temp_backup_dir/stack_states.json"
+    # Note: Containers are already started by start_containers() function above
+    # No need for additional stack restoration in backup process - that's only for restore operations
     
     # Clean up temporary directory
     rm -rf "$temp_backup_dir"
