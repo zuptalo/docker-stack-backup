@@ -1303,7 +1303,7 @@ restart_and_validate_services() {
     fi
     
     # Wait for Portainer to be ready
-    local max_wait=60
+    local max_wait=120  # Increased timeout for containers with health checks
     local wait_count=0
     while [[ $wait_count -lt $max_wait ]]; do
         if curl -s -f "http://localhost:9000/api/system/status" >/dev/null 2>&1; then
@@ -2899,12 +2899,12 @@ restore_enhanced_stacks() {
                         fi
                         
                         # Wait for stack to start up
-                        sleep 8  # Increased wait time for stack startup
+                        sleep 15  # Extended wait time for stack startup with API-only approach
                         
                         # Verify the stack is actually running by checking container status
                         local containers_running=false
                         local retries=0
-                        local max_retries=6  # Reduced retries since we're using better primary approach
+                        local max_retries=10  # Increased retries for API-only approach with longer waits
                         
                         while [[ $retries -lt $max_retries ]]; do
                             # Try multiple approaches to find running containers for this stack
@@ -2931,35 +2931,15 @@ restore_enhanced_stacks() {
                                 info "Attempt $((retries + 1))/$max_retries: No running containers found for stack $stack_name"
                             fi
                             
-                            # Final fallback: try direct docker approach if API methods failed
-                            if [[ $retries -eq 4 ]]; then
-                                info "API approaches not working, trying direct docker commands for: $stack_name"
-                                
-                                # Get all containers that belong to this stack (including stopped ones)
-                                local all_stack_containers
-                                all_stack_containers=$(sudo -u "$PORTAINER_USER" docker ps -a --filter "label=com.docker.compose.project=$stack_name" --format "{{.Names}}" 2>/dev/null || echo "")
-                                
-                                if [[ -z "$all_stack_containers" ]]; then
-                                    # Try alternative container name patterns
-                                    all_stack_containers=$(sudo -u "$PORTAINER_USER" docker ps -a --format "{{.Names}}" | grep -E "^${stack_name}[_-]|^${stack_name}$" 2>/dev/null || echo "")
-                                fi
-                                
-                                if [[ -n "$all_stack_containers" ]]; then
-                                    info "Found stack containers to start directly: $all_stack_containers"
-                                    echo "$all_stack_containers" | while read -r container_name; do
-                                        if [[ -n "$container_name" ]]; then
-                                            info "Starting container directly: $container_name"
-                                            sudo -u "$PORTAINER_USER" docker start "$container_name" 2>/dev/null || warn "Failed to start container: $container_name"
-                                        fi
-                                    done
-                                    
-                                    # Give direct start method some time
-                                    sleep 3
-                                fi
+                            # API-only approach as requested - no fallbacks to direct docker commands
+                            # Allow more time for containers with health checks to start properly
+                            if [[ $retries -ge 2 ]]; then
+                                info "Waiting longer for containers with health checks to start properly..."
+                                sleep 15  # Extended wait for slow-starting containers
                             fi
                             
                             retries=$((retries + 1))
-                            sleep 3  # Wait between retries
+                            sleep 8  # Increased wait between retries for API-only approach
                         done
                         
                         if [[ "$containers_running" == "true" ]]; then
@@ -3405,7 +3385,7 @@ start_portainer_only() {
 
 # Wait for Portainer to be ready and accessible
 wait_for_portainer_ready() {
-    local max_wait=60
+    local max_wait=120  # Increased timeout for containers with health checks
     local wait_count=0
     
     while [[ $wait_count -lt $max_wait ]]; do
@@ -3855,9 +3835,10 @@ create_stack_from_compose() {
             warn "Empty API response - possible authentication or connectivity issue"
         fi
         
-        # Try alternative approach: use Docker Compose directly but ensure Portainer can manage it
-        warn "Attempting fallback: direct compose deployment with Portainer labels"
-        create_stack_via_compose "$stack_name" "$compose_file"
+        # API-only approach as requested - no fallbacks to direct docker compose
+        error "Failed to create stack via Portainer API: $stack_name"
+        error "Check Portainer logs and network connectivity, then try again"
+        return 1
     fi
 }
 
@@ -3926,7 +3907,7 @@ restart_portainer_after_restore() {
     fi
     
     # Wait for Portainer to be ready
-    local max_wait=60
+    local max_wait=120  # Increased timeout for containers with health checks
     local wait_count=0
     info "Waiting for Portainer to be ready after restart..."
     
