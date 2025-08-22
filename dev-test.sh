@@ -1456,6 +1456,138 @@ test_enhanced_post_operation_validation() {
     return 0
 }
 
+# Test enhanced help and version information
+test_enhanced_help_and_version() {
+    info "Testing enhanced help and version information..."
+    
+    # Test version command
+    info "Testing version command..."
+    local version_output
+    version_output=$(/home/vagrant/docker-stack-backup/backup-manager.sh version 2>&1)
+    
+    if echo "$version_output" | grep -q "Docker Backup Manager v"; then
+        success "Version command shows version information"
+    else
+        error "Version command missing version information"
+        return 1
+    fi
+    
+    if echo "$version_output" | grep -q "Release Information"; then
+        success "Version command shows release information"
+    else
+        error "Version command missing release information"
+        return 1
+    fi
+    
+    if echo "$version_output" | grep -q "System Information"; then
+        success "Version command shows system information"
+    else
+        error "Version command missing system information"
+        return 1
+    fi
+    
+    if echo "$version_output" | grep -q "GitHub"; then
+        success "Version command includes GitHub links"
+    else
+        error "Version command missing GitHub links"
+        return 1
+    fi
+    
+    # Test version flag variants
+    for flag in "-v" "--version"; do
+        info "Testing version flag: $flag"
+        local flag_output
+        flag_output=$(/home/vagrant/docker-stack-backup/backup-manager.sh "$flag" 2>&1)
+        
+        if echo "$flag_output" | grep -q "Docker Backup Manager v"; then
+            success "Version flag $flag works correctly"
+        else
+            error "Version flag $flag failed"
+            return 1
+        fi
+    done
+    
+    # Test enhanced help output
+    info "Testing enhanced help output..."
+    local help_output
+    help_output=$(/home/vagrant/docker-stack-backup/backup-manager.sh --help 2>&1)
+    
+    if echo "$help_output" | grep -q "DOCUMENTATION & SUPPORT"; then
+        success "Help output includes documentation section"
+    else
+        error "Help output missing documentation section"
+        return 1
+    fi
+    
+    if echo "$help_output" | grep -q "github.com/zuptalo/docker-stack-backup"; then
+        success "Help output includes GitHub repository link"
+    else
+        error "Help output missing GitHub repository link"
+        return 1
+    fi
+    
+    if echo "$help_output" | grep -q "QUICK START GUIDE"; then
+        success "Help output includes quick start guide"
+    else
+        error "Help output missing quick start guide"
+        return 1
+    fi
+    
+    if echo "$help_output" | grep -q "COMMON SCENARIOS"; then
+        success "Help output includes common scenarios"
+    else
+        error "Help output missing common scenarios"
+        return 1
+    fi
+    
+    if echo "$help_output" | grep -q "Disaster Recovery"; then
+        success "Help output includes disaster recovery scenario"
+    else
+        error "Help output missing disaster recovery scenario"
+        return 1
+    fi
+    
+    if echo "$help_output" | grep -q "Server Migration"; then
+        success "Help output includes server migration scenario"
+    else
+        error "Help output missing server migration scenario"
+        return 1
+    fi
+    
+    if echo "$help_output" | grep -q "version.*Show version"; then
+        success "Help output lists version command"
+    else
+        error "Help output missing version command"
+        return 1
+    fi
+    
+    # Test help without arguments shows enhanced help
+    info "Testing no-arguments help display..."
+    local no_args_output
+    no_args_output=$(/home/vagrant/docker-stack-backup/backup-manager.sh 2>&1 || true)
+    
+    if echo "$no_args_output" | grep -q "No command specified" && echo "$no_args_output" | grep -q "DOCUMENTATION & SUPPORT"; then
+        success "No-arguments execution shows enhanced help"
+    else
+        warn "No-arguments execution may not show full enhanced help"
+    fi
+    
+    # Test command-specific help includes version
+    info "Testing command-specific help includes version..."
+    local setup_help
+    setup_help=$(/home/vagrant/docker-stack-backup/backup-manager.sh setup --help 2>&1)
+    
+    if echo "$setup_help" | grep -q "Docker Backup Manager v"; then
+        success "Command-specific help includes version"
+    else
+        error "Command-specific help missing version"
+        return 1
+    fi
+    
+    success "Enhanced help and version information tests completed"
+    return 0
+}
+
 # Test config command with existing installation
 test_config_command_with_existing_installation() {
     info "Testing config command with existing installation..."
@@ -6640,6 +6772,7 @@ run_vm_tests() {
     run_test "Backup File Validation" "test_backup_file_validation"
     run_test "Architecture Validation" "test_architecture_validation"
     run_test "Enhanced Post-Operation Validation" "test_enhanced_post_operation_validation"
+    run_test "Enhanced Help and Version Information" "test_enhanced_help_and_version"
     
     info "🛠️  PHASE 8: ERROR HANDLING TESTS"
     echo "=============================================================="

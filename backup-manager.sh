@@ -6238,7 +6238,7 @@ usage() {
     printf "%b" "$(cat << EOF
 Docker Backup Manager v${VERSION}
 
-Usage: $0 [FLAGS] {setup|config|backup|restore|schedule|generate-nas-script|update|uninstall}
+Usage: $0 [FLAGS] {setup|config|backup|restore|schedule|generate-nas-script|update|uninstall|version}
 
 ${BLUE}═══ FLAGS ═══${NC}
     ${BLUE}--yes, -y${NC}               # Auto-answer 'yes' to all prompts
@@ -6258,6 +6258,7 @@ ${BLUE}═══ WORKFLOW COMMANDS (in recommended order) ═══${NC}
     ${BLUE}generate-nas-script${NC} - 📡 Generate self-contained NAS backup script
     
     ${BLUE}update${NC}              - 🔄 Update script to latest version from GitHub
+    ${BLUE}version${NC}             - 📋 Show version and system information
     ${BLUE}uninstall${NC}           - 🗑️  Complete system cleanup (destructive operation)
 
 ${BLUE}═══ GETTING STARTED ═══${NC}
@@ -6286,7 +6287,44 @@ ${BLUE}═══ NON-INTERACTIVE USAGE ═══${NC}
     ${GREEN}BACKUP_PATH="/opt/backup"${NC}
     ${GREEN}BACKUP_RETENTION=7${NC}
 
+${BLUE}═══ DOCUMENTATION & SUPPORT ═══${NC}
+    ${BLUE}GitHub Repository:${NC} https://github.com/zuptalo/docker-stack-backup
+    ${BLUE}Documentation:${NC}     https://github.com/zuptalo/docker-stack-backup/blob/main/README.md
+    ${BLUE}Issues & Support:${NC}  https://github.com/zuptalo/docker-stack-backup/issues
+    ${BLUE}Latest Releases:${NC}   https://github.com/zuptalo/docker-stack-backup/releases
+
+${BLUE}═══ QUICK START GUIDE ═══${NC}
+    ${YELLOW}New Installation:${NC}
+    1. ${BLUE}$0 setup${NC}                    # Complete infrastructure deployment
+    2. ${BLUE}$0 backup${NC}                   # Create your first backup
+    3. ${BLUE}$0 schedule${NC}                 # Setup automated backups
+    
+    ${YELLOW}Daily Operations:${NC}
+    • ${BLUE}$0 backup${NC}                    # Manual backup creation
+    • ${BLUE}$0 restore${NC}                   # Interactive restore from backup
+    • ${BLUE}$0 generate-nas-script${NC}       # Create NAS backup client
+    
+    ${YELLOW}Maintenance:${NC}
+    • ${BLUE}$0 config${NC}                    # Modify configuration
+    • ${BLUE}$0 update${NC}                    # Update to latest version
+
+${BLUE}═══ COMMON SCENARIOS ═══${NC}
+    ${YELLOW}Disaster Recovery:${NC}
+    ${GREEN}$0 setup${NC}                      # Deploy fresh system
+    ${GREEN}$0 restore${NC}                    # Restore from backup
+    
+    ${YELLOW}Server Migration:${NC}
+    ${GREEN}$0 backup${NC}                     # Create backup on old server
+    ${GREEN}# Copy backup file to new server${NC}
+    ${GREEN}$0 setup${NC}                      # Setup new server
+    ${GREEN}$0 restore${NC}                    # Restore data
+    
+    ${YELLOW}Automation/CI:${NC}
+    ${GREEN}$0 --yes --non-interactive backup${NC}
+    ${GREEN}$0 --config-file=./config.conf setup${NC}
+
 ${YELLOW}💡 Note: Run 'setup' first if this is a new installation${NC}
+${YELLOW}📖 For detailed documentation, visit the GitHub repository${NC}
 
 EOF
 )"
@@ -6861,7 +6899,7 @@ main() {
     
     # First pass: check if we have a command followed by --help
     for arg in "$@"; do
-        if [[ "$arg" =~ ^(setup|backup|restore|schedule|config|generate-nas-script|update|uninstall)$ ]]; then
+        if [[ "$arg" =~ ^(setup|backup|restore|schedule|config|generate-nas-script|update|uninstall|version)$ ]]; then
             has_command=true
             break
         fi
@@ -7116,6 +7154,27 @@ main() {
             install_dependencies
             uninstall_system
             ;;
+        version|-v|--version)
+            printf "%b\n" "${BLUE}Docker Backup Manager v${VERSION}${NC}"
+            printf "\n"
+            printf "%b\n" "${YELLOW}📦 Release Information:${NC}"
+            printf "  • Version: %s\n" "$VERSION"
+            printf "  • Release Date: %s\n" "$(echo "$VERSION" | sed 's/2025\.08\.22\./August 22, 2025 - Build /')"
+            printf "  • GitHub: https://github.com/zuptalo/docker-stack-backup\n"
+            printf "  • Latest: https://github.com/zuptalo/docker-stack-backup/releases/latest\n"
+            printf "\n"
+            printf "%b\n" "${YELLOW}🛠️  System Information:${NC}"
+            printf "  • OS: %s\n" "$(uname -s) $(uname -r)"
+            printf "  • Architecture: %s\n" "$(uname -m)"
+            if command -v docker >/dev/null 2>&1; then
+                printf "  • Docker: %s\n" "$(docker --version 2>/dev/null || echo "Not installed")"
+            else
+                printf "  • Docker: Not installed\n"
+            fi
+            printf "\n"
+            printf "%b\n" "${GREEN}Run '$0 --help' for usage information${NC}"
+            exit 0
+            ;;
         help|--help|-h)
             usage
             exit 0
@@ -7129,7 +7188,7 @@ main() {
         *)
             printf "%b\n" "${RED}❌ Unknown command: $command${NC}"
             echo "💡 Did you mean one of these commands?"
-            echo "   • setup, backup, restore, schedule, config, update, uninstall"
+            echo "   • setup, backup, restore, schedule, config, update, uninstall, version"
             echo "   • Use '$0 --help' to see all available commands"
             echo "   • Use '$0 <command> --help' for command-specific help"
             echo
