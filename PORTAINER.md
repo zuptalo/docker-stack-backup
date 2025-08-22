@@ -212,6 +212,8 @@ curl -X PUT "http://localhost:9000/api/stacks/1?endpointId=1" \
 - `Env`: Array of environment variables
 - `Prune`: Remove orphaned containers (boolean)
 
+**⚠️ Important Note**: The PUT stack update operation **automatically starts the containers** as part of the deployment process. Do NOT call the start endpoint (`POST /stacks/{id}/start`) after a successful PUT update, as this will result in a 409 Conflict error ("stack already running").
+
 ### 6. Start Stack
 
 **Endpoint**: `POST /api/stacks/{id}/start`

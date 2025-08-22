@@ -3192,11 +3192,8 @@ restore_enhanced_stacks() {
                                     -H "Authorization: Bearer $jwt_token")
                             else
                                 info "Stack redeploy successful: $stack_name"
-                                # Explicitly start the stack after redeploy to ensure containers are running
-                                info "Starting stack after redeploy: $stack_name"
-                                local post_redeploy_start_response
-                                post_redeploy_start_response=$(curl -s -X POST "$PORTAINER_API_URL/stacks/$stack_id/start?endpointId=1" \
-                                    -H "Authorization: Bearer $jwt_token")
+                                # Note: PUT stack update automatically starts containers, no need for separate start call
+                                # This prevents the 409 "stack already running" error when containers are already active
                             fi
                         else
                             # No compose content available, try basic start (requires endpointId parameter)
@@ -3786,8 +3783,17 @@ verify_stack_running_via_api() {
     fi
     
     # Check if any containers are running
-    local running_containers
-    running_containers=$(echo "$stack_containers" | jq -r 'select(.State == "running") | .Names')
+    # Note: stack_containers contains individual JSON objects separated by newlines
+    local running_containers=""
+    while IFS= read -r container_json; do
+        if [[ -n "$container_json" ]]; then
+            local state=$(echo "$container_json" | jq -r '.State // "unknown"' 2>/dev/null)
+            if [[ "$state" == "running" ]]; then
+                local name=$(echo "$container_json" | jq -r '.Names // "unknown"' 2>/dev/null)
+                running_containers="${running_containers}${name} "
+            fi
+        fi
+    done <<< "$stack_containers"
     
     if [[ -n "$running_containers" ]]; then
         info "Stack $stack_name containers running: $running_containers"
