@@ -2671,34 +2671,59 @@ gracefully_stop_all_stacks() {
 }
 
 # Stop containers gracefully for backup (keeping Portainer running for API access)
+# Stop containers using Portainer Docker API (same endpoints as Portainer UI)
 stop_containers() {
-    info "Stopping containers gracefully..."
+    info "Stopping containers gracefully via Portainer API..."
     info "Keeping Portainer running to manage backup process"
     
-    # Note: No need to track running containers for snapshot restore 
-    # We will restore only what's in the backup via Portainer API
+    # Authenticate with Portainer API (using localhost since NPM may be down)
+    source "$PORTAINER_PATH/.credentials"
+    local auth_response
+    auth_response=$(curl -s -X POST "http://localhost:9000/api/auth" \
+        -H "Content-Type: application/json" \
+        -d "{\"Username\": \"$PORTAINER_ADMIN_USERNAME\", \"Password\": \"$PORTAINER_ADMIN_PASSWORD\"}")
     
-    # Stop nginx-proxy-manager
-    if sudo -u "$PORTAINER_USER" docker ps | grep -q "nginx-proxy-manager"; then
-        sudo -u "$PORTAINER_USER" docker stop nginx-proxy-manager
-        info "Stopped nginx-proxy-manager"
+    local jwt_token
+    jwt_token=$(echo "$auth_response" | jq -r '.jwt // empty')
+    
+    if [[ -z "$jwt_token" ]]; then
+        error "Failed to authenticate with Portainer API for container stopping"
+        return 1
     fi
     
-    # Stop all other containers (excluding Portainer - keep it running for API management)
-    local running_containers
-    running_containers=$(sudo -u "$PORTAINER_USER" docker ps --format "{{.Names}}")
+    # Get all containers using the same API endpoint as Portainer UI
+    local all_containers
+    all_containers=$(get_all_containers_via_api "$jwt_token")
     
-    if [[ -n "$running_containers" ]]; then
-        # Stop each container except Portainer
-        echo "$running_containers" | while read -r container_name; do
-            if [[ "$container_name" != "portainer" ]]; then
-                sudo -u "$PORTAINER_USER" docker stop "$container_name"
-                info "Stopped container: $container_name"
+    if [[ -z "$all_containers" ]]; then
+        warn "Could not retrieve containers via Portainer API, skipping graceful stop"
+        return 1
+    fi
+    
+    # Stop all containers except Portainer using the same API as Portainer UI
+    local containers_stopped=0
+    echo "$all_containers" | jq -r '.[] | select(.State == "running" and .Names[0] != "/portainer") | {Id: .Id, Name: .Names[0]}' | while read -r container_info; do
+        if [[ -n "$container_info" ]]; then
+            local container_id
+            local container_name
+            container_id=$(echo "$container_info" | jq -r '.Id')
+            container_name=$(echo "$container_info" | jq -r '.Name' | sed 's|^/||')
+            
+            if [[ -n "$container_id" && "$container_id" != "null" ]]; then
+                if stop_container_via_api "$jwt_token" "$container_id"; then
+                    info "Stopped container: $container_name (ID: $container_id)"
+                    containers_stopped=$((containers_stopped + 1))
+                else
+                    warn "Failed to stop container: $container_name (ID: $container_id)"
+                fi
             fi
-        done
-    fi
+        fi
+    done
     
-    success "Containers stopped gracefully (Portainer kept running)"
+    # Wait for containers to stop gracefully
+    sleep 5
+    
+    success "Containers stopped gracefully via Portainer API (Portainer kept running)"
 }
 
 # Start containers after backup
@@ -2901,34 +2926,21 @@ restore_enhanced_stacks() {
                         # Wait for stack to start up
                         sleep 15  # Extended wait time for stack startup with API-only approach
                         
-                        # Verify the stack is actually running by checking container status
+                        # Verify the stack is actually running using Portainer Docker API (same as Portainer UI)
                         local containers_running=false
                         local retries=0
                         local max_retries=10  # Increased retries for API-only approach with longer waits
                         
                         while [[ $retries -lt $max_retries ]]; do
-                            # Try multiple approaches to find running containers for this stack
-                            local running_containers=""
+                            info "Attempt $((retries + 1))/$max_retries: Verifying stack $stack_name via Portainer Docker API"
                             
-                            # Method 1: Check by compose project label
-                            running_containers=$(sudo -u "$PORTAINER_USER" docker ps --filter "label=com.docker.compose.project=$stack_name" --format "{{.Names}}" 2>/dev/null || echo "")
-                            
-                            # Method 2: If no containers found, try checking by stack name in container names
-                            if [[ -z "$running_containers" ]]; then
-                                running_containers=$(sudo -u "$PORTAINER_USER" docker ps --format "{{.Names}}" | grep -E "^${stack_name}[_-]" 2>/dev/null || echo "")
-                            fi
-                            
-                            # Method 3: If still no containers, check by exact container name match
-                            if [[ -z "$running_containers" ]]; then
-                                running_containers=$(sudo -u "$PORTAINER_USER" docker ps --format "{{.Names}}" | grep -E "^${stack_name}$" 2>/dev/null || echo "")
-                            fi
-                            
-                            if [[ -n "$running_containers" ]]; then
+                            # Use the same Portainer Docker API that the UI uses
+                            if verify_stack_running_via_api "$jwt_token" "$stack_name"; then
                                 containers_running=true
-                                info "Found running containers for stack $stack_name: $running_containers"
+                                success "Stack $stack_name verified running via Portainer Docker API"
                                 break
                             else
-                                info "Attempt $((retries + 1))/$max_retries: No running containers found for stack $stack_name"
+                                info "Stack $stack_name not yet running, waiting..."
                             fi
                             
                             # API-only approach as requested - no fallbacks to direct docker commands
@@ -3381,6 +3393,121 @@ start_portainer_only() {
     fi
     
     success "Portainer started successfully"
+}
+
+# Get all containers using Portainer Docker API (same endpoint as Portainer UI)
+get_all_containers_via_api() {
+    local jwt_token="$1"
+    local endpoint_id="${2:-1}"
+    
+    # Use localhost since NPM may be down during backup/restore operations
+    local containers_response
+    containers_response=$(curl -s -H "Authorization: Bearer $jwt_token" \
+        "http://localhost:9000/api/endpoints/$endpoint_id/docker/v1.41/containers/json?all=true")
+    
+    if [[ -n "$containers_response" ]] && echo "$containers_response" | jq -e . >/dev/null 2>&1; then
+        echo "$containers_response"
+        return 0
+    else
+        warn "Failed to get containers via Portainer Docker API"
+        return 1
+    fi
+}
+
+# Start container using Portainer Docker API (same endpoint as Portainer UI)
+start_container_via_api() {
+    local jwt_token="$1"
+    local container_id="$2"
+    local endpoint_id="${3:-1}"
+    
+    info "Starting container via Portainer API: $container_id"
+    
+    # Use localhost since NPM may be down during backup/restore operations
+    local start_response
+    start_response=$(curl -s -X POST -H "Authorization: Bearer $jwt_token" \
+        "http://localhost:9000/api/endpoints/$endpoint_id/docker/v1.41/containers/$container_id/start")
+    
+    # Docker API returns 204 No Content on success, so empty response is success
+    if [[ -z "$start_response" ]] || [[ "$start_response" == "{}" ]]; then
+        info "Successfully started container: $container_id"
+        return 0
+    else
+        warn "Failed to start container $container_id via API: $start_response"
+        return 1
+    fi
+}
+
+# Stop container using Portainer Docker API (same endpoint as Portainer UI)
+stop_container_via_api() {
+    local jwt_token="$1"
+    local container_id="$2"
+    local endpoint_id="${3:-1}"
+    
+    info "Stopping container via Portainer API: $container_id"
+    
+    # Use localhost since NPM may be down during backup/restore operations
+    local stop_response
+    stop_response=$(curl -s -X POST -H "Authorization: Bearer $jwt_token" \
+        "http://localhost:9000/api/endpoints/$endpoint_id/docker/v1.41/containers/$container_id/stop")
+    
+    # Docker API returns 204 No Content on success, so empty response is success
+    if [[ -z "$stop_response" ]] || [[ "$stop_response" == "{}" ]]; then
+        info "Successfully stopped container: $container_id"
+        return 0
+    else
+        warn "Failed to stop container $container_id via API: $stop_response"
+        return 1
+    fi
+}
+
+# Get containers for a specific stack using Portainer Docker API
+get_stack_containers_via_api() {
+    local jwt_token="$1"
+    local stack_name="$2"
+    local endpoint_id="${3:-1}"
+    
+    local all_containers
+    all_containers=$(get_all_containers_via_api "$jwt_token" "$endpoint_id")
+    
+    if [[ -z "$all_containers" ]]; then
+        return 1
+    fi
+    
+    # Filter containers by compose project label (same as Portainer does)
+    local stack_containers
+    stack_containers=$(echo "$all_containers" | jq -r ".[] | select(.Labels[\"com.docker.compose.project\"] == \"$stack_name\") | {Id: .Id, Names: .Names[0], State: .State, Labels: .Labels}")
+    
+    if [[ -n "$stack_containers" ]]; then
+        echo "$stack_containers"
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Verify containers are running using Portainer Docker API
+verify_stack_running_via_api() {
+    local jwt_token="$1"
+    local stack_name="$2"
+    local endpoint_id="${3:-1}"
+    
+    local stack_containers
+    stack_containers=$(get_stack_containers_via_api "$jwt_token" "$stack_name" "$endpoint_id")
+    
+    if [[ -z "$stack_containers" ]]; then
+        return 1
+    fi
+    
+    # Check if any containers are running
+    local running_containers
+    running_containers=$(echo "$stack_containers" | jq -r 'select(.State == "running") | .Names')
+    
+    if [[ -n "$running_containers" ]]; then
+        info "Stack $stack_name containers running: $running_containers"
+        return 0
+    else
+        return 1
+    fi
 }
 
 # Wait for Portainer to be ready and accessible
