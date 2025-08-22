@@ -2521,30 +2521,26 @@ get_stack_states() {
     
     source "$PORTAINER_PATH/.credentials"
     
-    # Login to Portainer API
-    local auth_response
-    auth_response=$(curl -s -X POST "$PORTAINER_API_URL/auth" \
-        -H "Content-Type: application/json" \
-        -d "{\"Username\": \"$PORTAINER_ADMIN_USERNAME\", \"Password\": \"$PORTAINER_ADMIN_PASSWORD\"}")
-    
+    # Authenticate using enhanced authentication helper
     local jwt_token
-    jwt_token=$(echo "$auth_response" | jq -r '.jwt // empty')
+    jwt_token=$(authenticate_portainer_api "$PORTAINER_API_URL")
     
     if [[ -z "$jwt_token" ]]; then
-        # Check if it's an initialization timeout (expected for fresh Portainer)
-        if echo "$auth_response" | grep -q "initialization timeout"; then
-            info "Portainer requires initial admin setup via web UI"
-        else
-            warn "Failed to authenticate with Portainer API"
-            warn "Response: $auth_response"
-        fi
+        warn "Failed to authenticate with Portainer API for stack state capture"
         echo "{}" > "$output_file"
         return 0
     fi
     
-    # Get basic stack information
+    # Get basic stack information with timeout and error handling
     local stacks_response
-    stacks_response=$(curl -s -H "Authorization: Bearer $jwt_token" "$PORTAINER_API_URL/stacks")
+    stacks_response=$(curl -s --max-time 15 -H "Authorization: Bearer $jwt_token" "$PORTAINER_API_URL/stacks")
+    
+    if [[ -z "$stacks_response" ]] || ! echo "$stacks_response" | jq -e . >/dev/null 2>&1; then
+        warn "Failed to retrieve stacks from Portainer API"
+        warn "API Response: ${stacks_response:-'empty'}"
+        echo "{}" > "$output_file"
+        return 0
+    fi
     
     # Create enhanced state information with detailed capture
     local enhanced_stacks="[]"
@@ -2560,14 +2556,14 @@ get_stack_states() {
             if [[ -n "$stack_id" && "$stack_id" != "null" ]]; then
                 info "Capturing detailed information for stack ID: $stack_id"
                 
-                # Get detailed stack information
+                # Get detailed stack information with enhanced error handling
                 local stack_detail
-                stack_detail=$(curl -s -H "Authorization: Bearer $jwt_token" "$PORTAINER_API_URL/stacks/$stack_id")
+                stack_detail=$(curl -s --max-time 10 -H "Authorization: Bearer $jwt_token" "$PORTAINER_API_URL/stacks/$stack_id")
                 
-                if [[ "$stack_detail" != "null" && -n "$stack_detail" ]]; then
-                    # Get stack file (compose.yml content)
+                if [[ "$stack_detail" != "null" && -n "$stack_detail" ]] && echo "$stack_detail" | jq -e . >/dev/null 2>&1; then
+                    # Get stack file (compose.yml content) with timeout
                     local stack_file
-                    stack_file=$(curl -s -H "Authorization: Bearer $jwt_token" "$PORTAINER_API_URL/stacks/$stack_id/file")
+                    stack_file=$(curl -s --max-time 10 -H "Authorization: Bearer $jwt_token" "$PORTAINER_API_URL/stacks/$stack_id/file")
                     
                     # Enhance the stack detail with compose file content
                     local enhanced_stack
@@ -2670,118 +2666,393 @@ gracefully_stop_all_stacks() {
     fi
 }
 
-# Stop containers gracefully for backup (keeping Portainer running for API access)
-# Stop containers using Portainer Docker API (same endpoints as Portainer UI)
-stop_containers() {
-    info "Stopping containers gracefully via Portainer API..."
-    info "Keeping Portainer running to manage backup process"
+# Enhanced Portainer API authentication with retry logic and comprehensive error handling
+authenticate_portainer_api() {
+    local api_url="$1"
+    local max_attempts=3
+    local attempt=1
     
-    # Authenticate with Portainer API (using localhost since NPM may be down)
-    source "$PORTAINER_PATH/.credentials"
-    local auth_response
-    auth_response=$(curl -s -X POST "http://localhost:9000/api/auth" \
-        -H "Content-Type: application/json" \
-        -d "{\"Username\": \"$PORTAINER_ADMIN_USERNAME\", \"Password\": \"$PORTAINER_ADMIN_PASSWORD\"}")
-    
-    local jwt_token
-    jwt_token=$(echo "$auth_response" | jq -r '.jwt // empty')
-    
-    if [[ -z "$jwt_token" ]]; then
-        error "Failed to authenticate with Portainer API for container stopping"
-        return 1
-    fi
-    
-    # Get all containers using the same API endpoint as Portainer UI
-    local all_containers
-    all_containers=$(get_all_containers_via_api "$jwt_token")
-    
-    if [[ -z "$all_containers" ]]; then
-        warn "Could not retrieve containers via Portainer API, skipping graceful stop"
-        return 1
-    fi
-    
-    # Stop all containers except Portainer using the same API as Portainer UI
-    local containers_stopped=0
-    
-    # Get running containers excluding Portainer, output as separate lines
-    local running_container_ids
-    running_container_ids=$(echo "$all_containers" | jq -r '.[] | select(.State == "running" and .Names[0] != "/portainer") | .Id')
-    
-    if [[ -n "$running_container_ids" ]]; then
-        while IFS= read -r container_id; do
-            if [[ -n "$container_id" && "$container_id" != "null" ]]; then
-                # Get container name for logging
-                local container_name
-                container_name=$(echo "$all_containers" | jq -r --arg id "$container_id" '.[] | select(.Id == $id) | .Names[0]' | sed 's|^/||')
-                
-                if stop_container_via_api "$jwt_token" "$container_id"; then
-                    info "Stopped container: $container_name (ID: $container_id)"
-                    containers_stopped=$((containers_stopped + 1))
-                else
-                    warn "Failed to stop container: $container_name (ID: $container_id)"
-                fi
+    while [[ $attempt -le $max_attempts ]]; do
+        local auth_response
+        auth_response=$(curl -s --max-time 10 -X POST "$api_url/auth" \
+            -H "Content-Type: application/json" \
+            -d "{\"Username\": \"$PORTAINER_ADMIN_USERNAME\", \"Password\": \"$PORTAINER_ADMIN_PASSWORD\"}")
+        
+        if [[ -n "$auth_response" ]] && echo "$auth_response" | jq -e . >/dev/null 2>&1; then
+            local jwt_token
+            jwt_token=$(echo "$auth_response" | jq -r '.jwt // empty')
+            
+            if [[ -n "$jwt_token" && "$jwt_token" != "null" ]]; then
+                echo "$jwt_token"
+                return 0
             fi
-        done <<< "$running_container_ids"
-    else
-        info "No running containers found to stop (excluding Portainer)"
-    fi
+        fi
+        
+        warn "Authentication attempt $attempt/$max_attempts failed"
+        if [[ -n "$auth_response" ]]; then
+            warn "Auth response: $auth_response"
+        fi
+        
+        if [[ $attempt -lt $max_attempts ]]; then
+            sleep 2
+        fi
+        ((attempt++))
+    done
     
-    # Wait for containers to stop gracefully
-    sleep 5
-    
-    success "Containers stopped gracefully via Portainer API (Portainer kept running)"
+    error "Failed to authenticate with Portainer API after $max_attempts attempts"
+    return 1
 }
 
-# Start containers after backup
-start_containers() {
-    info "Starting containers after backup..."
+# Stop containers gracefully for backup using enhanced stack-based approach
+# Uses proper Portainer Stack APIs with comprehensive error handling and fallbacks
+stop_containers() {
+    info "Stopping stacks gracefully via Portainer Stack API..."
+    info "Keeping Portainer running to manage backup process"
     
-    # Check if Portainer is running, start it if not
+    # Check API availability with retry logic
+    local api_available=false
+    local max_attempts=3
+    local attempt=1
+    
+    while [[ $attempt -le $max_attempts ]]; do
+        if curl -s --max-time 5 "http://localhost:9000/api/status" >/dev/null 2>&1; then
+            api_available=true
+            break
+        fi
+        warn "Portainer API not responding (attempt $attempt/$max_attempts)"
+        sleep 2
+        ((attempt++))
+    done
+    
+    if [[ "$api_available" != "true" ]]; then
+        warn "Portainer API unavailable after $max_attempts attempts"
+        warn "Falling back to direct Docker commands for container stopping"
+        return 1
+    fi
+    
+    # Authenticate with enhanced error handling
+    source "$PORTAINER_PATH/.credentials"
+    local jwt_token
+    jwt_token=$(authenticate_portainer_api "http://localhost:9000/api")
+    
+    if [[ -z "$jwt_token" ]]; then
+        error "Failed to authenticate with Portainer API for stack stopping"
+        warn "Falling back to direct Docker commands"
+        return 1
+    fi
+    
+    # Get all stacks using enhanced API patterns
+    info "Retrieving stack information for graceful shutdown..."
+    local stacks_response
+    stacks_response=$(curl -s --max-time 10 -H "Authorization: Bearer $jwt_token" \
+        "http://localhost:9000/api/stacks")
+    
+    if [[ -z "$stacks_response" ]] || ! echo "$stacks_response" | jq -e . >/dev/null 2>&1; then
+        warn "Could not retrieve stacks via Portainer API"
+        warn "API Response: ${stacks_response:-'empty'}"
+        return 1
+    fi
+    
+    # Process stacks using documented API endpoints
+    local stacks_stopped=0
+    local stack_count
+    stack_count=$(echo "$stacks_response" | jq length)
+    
+    if [[ "$stack_count" -eq 0 ]]; then
+        info "No stacks found to stop"
+        return 0
+    fi
+    
+    info "Found $stack_count stacks, stopping non-essential stacks..."
+    
+    # Stop each stack except critical ones (keep Portainer ecosystem running)
+    echo "$stacks_response" | jq -c '.[]' | while read -r stack; do
+        local stack_id stack_name stack_status
+        stack_id=$(echo "$stack" | jq -r '.Id')
+        stack_name=$(echo "$stack" | jq -r '.Name')
+        stack_status=$(echo "$stack" | jq -r '.Status')
+        
+        # Skip if stack is already stopped or if it's critical for backup process
+        if [[ "$stack_status" != "1" ]]; then
+            info "Stack '$stack_name' is already stopped (status: $stack_status)"
+            continue
+        fi
+        
+        # Keep essential stacks running during backup (but log them for user awareness)
+        case "$stack_name" in
+            *portainer*|*backup*|*monitoring*)
+                info "Keeping essential stack '$stack_name' running during backup"
+                continue
+                ;;
+            *nginx-proxy-manager*|*traefik*|*caddy*)
+                # Allow reverse proxies to be stopped since we have fallback startup logic
+                info "Stopping reverse proxy stack '$stack_name' for clean backup"
+                ;;
+        esac
+        
+        info "Stopping stack: $stack_name (ID: $stack_id)"
+        
+        # Use proper Stack Stop API endpoint as documented
+        local stop_response
+        stop_response=$(curl -s --max-time 30 -X POST \
+            -H "Authorization: Bearer $jwt_token" \
+            "http://localhost:9000/api/stacks/$stack_id/stop")
+        
+        # Enhanced response handling
+        if [[ $? -eq 0 ]]; then
+            # Verify stack stopped (API may return success even if partial failure)
+            sleep 3
+            local stack_status_check
+            stack_status_check=$(curl -s -H "Authorization: Bearer $jwt_token" \
+                "http://localhost:9000/api/stacks/$stack_id" | jq -r '.Status // "unknown"')
+            
+            if [[ "$stack_status_check" == "2" ]]; then
+                success "Successfully stopped stack: $stack_name"
+                stacks_stopped=$((stacks_stopped + 1))
+            else
+                warn "Stack '$stack_name' may not have stopped completely (status: $stack_status_check)"
+            fi
+        else
+            warn "Failed to stop stack: $stack_name"
+            if [[ -n "$stop_response" ]]; then
+                warn "Stop response: $stop_response"
+            fi
+        fi
+    done
+    
+    # Graceful shutdown delay for containers to clean up
+    if [[ $stacks_stopped -gt 0 ]]; then
+        info "Waiting for $stacks_stopped stacks to shut down gracefully..."
+        sleep 8
+    fi
+    
+    success "Stack-based graceful shutdown completed ($stacks_stopped stacks stopped)"
+    return 0
+}
+
+# Start stacks after backup using enhanced stack-based approach
+# Uses proper Portainer Stack APIs with comprehensive error handling and health checks
+start_containers() {
+    info "Starting stacks after backup using Portainer Stack API..."
+    
+    # Ensure Portainer is running first
     if ! sudo -u "$PORTAINER_USER" docker ps --format "{{.Names}}" | grep -q "^portainer$"; then
         warn "Portainer was stopped during backup, restarting..."
         cd "$PORTAINER_PATH"
         sudo -u "$PORTAINER_USER" docker compose up -d
-        sleep 15  # Give Portainer more time to start
-        info "Portainer restarted"
+        
+        # Wait for Portainer to be ready with health checks
+        local portainer_ready=false
+        local max_attempts=12
+        local attempt=1
+        
+        while [[ $attempt -le $max_attempts ]]; do
+            if curl -s --max-time 5 "http://localhost:9000/api/status" >/dev/null 2>&1; then
+                portainer_ready=true
+                success "Portainer API is ready"
+                break
+            fi
+            info "Waiting for Portainer to be ready... (attempt $attempt/$max_attempts)"
+            sleep 5
+            ((attempt++))
+        done
+        
+        if [[ "$portainer_ready" != "true" ]]; then
+            error "Portainer failed to become ready after restart"
+            return 1
+        fi
     else
         info "Portainer remained running during backup"
     fi
     
-    # Start nginx-proxy-manager (reverse proxy) first as it's critical for accessing everything
-    info "Starting nginx-proxy-manager (reverse proxy)..."
-    cd "$TOOLS_PATH/nginx-proxy-manager"
-    sudo -u "$PORTAINER_USER" docker compose up -d
+    # Authenticate with Portainer API
+    source "$PORTAINER_PATH/.credentials"
+    local jwt_token
+    jwt_token=$(authenticate_portainer_api "http://localhost:9000/api")
     
-    # Wait a bit for NPM to be ready
-    sleep 10
+    if [[ -z "$jwt_token" ]]; then
+        error "Failed to authenticate with Portainer API for stack starting"
+        warn "Falling back to direct Docker Compose commands"
+        fallback_start_containers
+        return 1
+    fi
     
-    success "Core containers started"
+    # Get all stacks to identify which ones need to be started
+    local stacks_response
+    stacks_response=$(curl -s --max-time 10 -H "Authorization: Bearer $jwt_token" \
+        "http://localhost:9000/api/stacks")
     
-    # Restart any standalone containers that were running before backup
-    local running_containers_file="$TEMP_DIR/running_containers.txt"
-    if [[ -f "$running_containers_file" ]]; then
-        info "Restoring standalone containers that were running before backup..."
+    if [[ -z "$stacks_response" ]] || ! echo "$stacks_response" | jq -e . >/dev/null 2>&1; then
+        warn "Could not retrieve stacks via Portainer API for startup"
+        fallback_start_containers
+        return 1
+    fi
+    
+    # Start stopped stacks in proper order
+    local stacks_started=0
+    local total_stacks
+    total_stacks=$(echo "$stacks_response" | jq length)
+    
+    info "Found $total_stacks stacks, starting stopped stacks in priority order..."
+    
+    # Define startup priority order (reverse proxy first, then other services)
+    local priority_stacks=("nginx-proxy-manager" "traefik" "caddy")
+    
+    # Start priority stacks first
+    for priority_stack in "${priority_stacks[@]}"; do
+        local stack_info
+        stack_info=$(echo "$stacks_response" | jq -c ".[] | select(.Name == \"$priority_stack\")")
         
-        while read -r container_name; do
-            if [[ -n "$container_name" ]]; then
-                # Skip containers that are already managed by Portainer stacks
-                if [[ "$container_name" != "nginx-proxy-manager" ]]; then
-                    # Check if container exists and is not running
-                    if sudo -u "$PORTAINER_USER" docker ps -a --format "{{.Names}}" | grep -q "^${container_name}$"; then
-                        if ! sudo -u "$PORTAINER_USER" docker ps --format "{{.Names}}" | grep -q "^${container_name}$"; then
-                            info "Restarting standalone container: $container_name"
-                            sudo -u "$PORTAINER_USER" docker start "$container_name" || warn "Failed to restart container: $container_name"
-                        else
-                            info "Container already running: $container_name"
-                        fi
-                    else
-                        warn "Container no longer exists: $container_name"
-                    fi
-                fi
+        if [[ -n "$stack_info" ]]; then
+            start_single_stack "$stack_info" "$jwt_token"
+            if [[ $? -eq 0 ]]; then
+                stacks_started=$((stacks_started + 1))
+                # Give reverse proxy time to initialize before starting other services
+                sleep 5
             fi
-        done < "$running_containers_file"
+        fi
+    done
+    
+    # Start remaining stacks
+    echo "$stacks_response" | jq -c '.[]' | while read -r stack; do
+        local stack_name
+        stack_name=$(echo "$stack" | jq -r '.Name')
         
-        success "Standalone container restoration completed"
+        # Skip if already started as priority stack
+        local is_priority=false
+        for priority_stack in "${priority_stacks[@]}"; do
+            if [[ "$stack_name" == "$priority_stack" ]]; then
+                is_priority=true
+                break
+            fi
+        done
+        
+        if [[ "$is_priority" == "false" ]]; then
+            start_single_stack "$stack" "$jwt_token"
+            if [[ $? -eq 0 ]]; then
+                stacks_started=$((stacks_started + 1))
+                # Brief pause between stack starts to avoid overwhelming the system
+                sleep 2
+            fi
+        fi
+    done
+    
+    success "Stack-based startup completed ($stacks_started stacks started)"
+    
+    # Perform health checks on critical services
+    perform_post_startup_health_checks "$jwt_token"
+    return 0
+}
+
+# Start a single stack with proper error handling and status verification
+start_single_stack() {
+    local stack_info="$1"
+    local jwt_token="$2"
+    
+    local stack_id stack_name stack_status
+    stack_id=$(echo "$stack_info" | jq -r '.Id')
+    stack_name=$(echo "$stack_info" | jq -r '.Name')
+    stack_status=$(echo "$stack_info" | jq -r '.Status')
+    
+    # Skip if stack is already running
+    if [[ "$stack_status" == "1" ]]; then
+        info "Stack '$stack_name' is already running"
+        return 0
+    fi
+    
+    info "Starting stack: $stack_name (ID: $stack_id)"
+    
+    # Use proper Stack Start API endpoint
+    local start_response
+    start_response=$(curl -s --max-time 30 -X POST \
+        -H "Authorization: Bearer $jwt_token" \
+        "http://localhost:9000/api/stacks/$stack_id/start")
+    
+    if [[ $? -eq 0 ]]; then
+        # Verify stack started successfully
+        sleep 3
+        local stack_status_check
+        stack_status_check=$(curl -s -H "Authorization: Bearer $jwt_token" \
+            "http://localhost:9000/api/stacks/$stack_id" | jq -r '.Status // "unknown"')
+        
+        if [[ "$stack_status_check" == "1" ]]; then
+            success "Successfully started stack: $stack_name"
+            return 0
+        else
+            warn "Stack '$stack_name' may not have started completely (status: $stack_status_check)"
+            return 1
+        fi
+    else
+        warn "Failed to start stack: $stack_name"
+        if [[ -n "$start_response" ]]; then
+            warn "Start response: $start_response"
+        fi
+        return 1
+    fi
+}
+
+# Fallback method using direct Docker Compose commands
+fallback_start_containers() {
+    info "Using fallback Docker Compose startup method..."
+    
+    # Start nginx-proxy-manager first (critical reverse proxy)
+    if [[ -d "$TOOLS_PATH/nginx-proxy-manager" ]]; then
+        info "Starting nginx-proxy-manager via Docker Compose..."
+        cd "$TOOLS_PATH/nginx-proxy-manager"
+        sudo -u "$PORTAINER_USER" docker compose up -d
+        sleep 10
+    fi
+    
+    # Start other compose projects found in tools path
+    find "$TOOLS_PATH" -name "docker-compose.yml" -not -path "*/nginx-proxy-manager/*" | while read -r compose_file; do
+        local project_dir
+        project_dir=$(dirname "$compose_file")
+        local project_name
+        project_name=$(basename "$project_dir")
+        
+        info "Starting $project_name via Docker Compose..."
+        cd "$project_dir"
+        sudo -u "$PORTAINER_USER" docker compose up -d
+        sleep 3
+    done
+    
+    success "Fallback startup completed"
+}
+
+# Perform health checks after startup to ensure services are accessible
+perform_post_startup_health_checks() {
+    local jwt_token="$1"
+    
+    info "Performing post-startup health checks..."
+    
+    # Check Portainer API health
+    if curl -s --max-time 5 "http://localhost:9000/api/status" >/dev/null 2>&1; then
+        success "✓ Portainer API is healthy"
+    else
+        warn "✗ Portainer API health check failed"
+    fi
+    
+    # Check if nginx-proxy-manager is responding
+    if curl -s --max-time 5 "http://localhost:81" >/dev/null 2>&1; then
+        success "✓ nginx-proxy-manager is responding"
+    else
+        warn "✗ nginx-proxy-manager health check failed"
+    fi
+    
+    # Verify stack statuses via API
+    local stacks_response
+    stacks_response=$(curl -s --max-time 10 -H "Authorization: Bearer $jwt_token" \
+        "http://localhost:9000/api/stacks")
+    
+    if [[ -n "$stacks_response" ]] && echo "$stacks_response" | jq -e . >/dev/null 2>&1; then
+        local running_stacks
+        running_stacks=$(echo "$stacks_response" | jq -r '[.[] | select(.Status == 1) | .Name] | length')
+        local total_stacks
+        total_stacks=$(echo "$stacks_response" | jq length)
+        
+        success "✓ Stack status: $running_stacks/$total_stacks stacks running"
+    else
+        warn "✗ Could not verify stack statuses"
     fi
 }
 
