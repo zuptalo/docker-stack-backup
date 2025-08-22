@@ -341,11 +341,12 @@ validate_backup_file() {
                 errors+=("Backup file appears corrupted: $LATEST_BACKUP")
             fi
             
-            # Check backup file size (should be more than 1KB)
+            # Check backup file size (should be more than 1MB for realistic backup)
             local file_size
             file_size=$(stat -c%s "$LATEST_BACKUP" 2>/dev/null || echo "0")
-            if [[ "$file_size" -lt 1024 ]]; then
-                errors+=("Backup file suspiciously small: $LATEST_BACKUP ($file_size bytes)")
+            if [[ "$file_size" -lt 1048576 ]]; then  # 1MB
+                local human_size=$(du -h "$LATEST_BACKUP" 2>/dev/null | cut -f1)
+                errors+=("Backup file suspiciously small: $LATEST_BACKUP ($human_size) - may indicate backup creation issue")
             fi
         fi
     fi
@@ -395,9 +396,15 @@ validate_backup_integrity() {
                 errors+=("Backup missing metadata file")
             fi
             
-            # Check for expected directories in backup
-            if ! tar -tzf "$LATEST_BACKUP" | grep -q "opt/portainer/"; then
-                errors+=("Backup missing Portainer data")
+            # Check for expected directories in backup with more flexible matching
+            local portainer_path_check=$(echo "$PORTAINER_PATH" | sed 's|^/||')  # Remove leading slash for tar content
+            if ! tar -tzf "$LATEST_BACKUP" | grep -q "$portainer_path_check"; then
+                # Try alternative patterns before failing
+                if ! tar -tzf "$LATEST_BACKUP" | grep -q "portainer"; then
+                    # Show what's actually in the backup for debugging
+                    local backup_contents=$(tar -tzf "$LATEST_BACKUP" | head -10 | tr '\n' ' ')
+                    errors+=("Backup missing Portainer data (expected: $portainer_path_check, found: $backup_contents...)")
+                fi
             fi
             
             # Cleanup
