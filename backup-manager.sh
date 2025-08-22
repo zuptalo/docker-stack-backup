@@ -2702,14 +2702,18 @@ stop_containers() {
     
     # Stop all containers except Portainer using the same API as Portainer UI
     local containers_stopped=0
-    echo "$all_containers" | jq -r '.[] | select(.State == "running" and .Names[0] != "/portainer") | {Id: .Id, Name: .Names[0]}' | while read -r container_info; do
-        if [[ -n "$container_info" ]]; then
-            local container_id
-            local container_name
-            container_id=$(echo "$container_info" | jq -r '.Id')
-            container_name=$(echo "$container_info" | jq -r '.Name' | sed 's|^/||')
-            
+    
+    # Get running containers excluding Portainer, output as separate lines
+    local running_container_ids
+    running_container_ids=$(echo "$all_containers" | jq -r '.[] | select(.State == "running" and .Names[0] != "/portainer") | .Id')
+    
+    if [[ -n "$running_container_ids" ]]; then
+        while IFS= read -r container_id; do
             if [[ -n "$container_id" && "$container_id" != "null" ]]; then
+                # Get container name for logging
+                local container_name
+                container_name=$(echo "$all_containers" | jq -r --arg id "$container_id" '.[] | select(.Id == $id) | .Names[0]' | sed 's|^/||')
+                
                 if stop_container_via_api "$jwt_token" "$container_id"; then
                     info "Stopped container: $container_name (ID: $container_id)"
                     containers_stopped=$((containers_stopped + 1))
@@ -2717,8 +2721,10 @@ stop_containers() {
                     warn "Failed to stop container: $container_name (ID: $container_id)"
                 fi
             fi
-        fi
-    done
+        done <<< "$running_container_ids"
+    else
+        info "No running containers found to stop (excluding Portainer)"
+    fi
     
     # Wait for containers to stop gracefully
     sleep 5
@@ -3410,6 +3416,11 @@ get_all_containers_via_api() {
         return 0
     else
         warn "Failed to get containers via Portainer Docker API"
+        if [[ -n "$containers_response" ]]; then
+            warn "API Response: $containers_response"
+        else
+            warn "Empty response from API"
+        fi
         return 1
     fi
 }
