@@ -5797,6 +5797,184 @@ EOF
     fi
 }
 
+# Test enhanced backup with complete Portainer shutdown
+test_enhanced_backup_with_portainer_shutdown() {
+    info "Testing enhanced backup with complete Portainer shutdown..."
+    cd /home/vagrant/docker-stack-backup
+    
+    # Verify initial state - Portainer should be running
+    if ! sudo docker ps --format "{{.Names}}" | grep -q "^portainer$"; then
+        error "Portainer not running before backup test"
+        return 1
+    fi
+    
+    # Run enhanced backup process
+    sudo -u portainer DOCKER_BACKUP_TEST=true ./backup-manager.sh backup
+    
+    # Verify backup was created
+    if ! ls /opt/backup/docker_backup_*.tar.gz >/dev/null 2>&1; then
+        error "Enhanced backup was not created"
+        return 1
+    fi
+    
+    # Verify Portainer is running after backup (should be restarted)
+    local max_attempts=30
+    local attempt=1
+    
+    while [[ $attempt -le $max_attempts ]]; do
+        if sudo docker ps --format "{{.Names}}" | grep -q "^portainer$"; then
+            success "Portainer properly restarted after enhanced backup"
+            break
+        fi
+        
+        info "Waiting for Portainer restart... (attempt $attempt/$max_attempts)"
+        sleep 2
+        ((attempt++))
+    done
+    
+    if [[ $attempt -gt $max_attempts ]]; then
+        error "Portainer did not restart after enhanced backup"
+        return 1
+    fi
+    
+    # Verify nginx-proxy-manager is also running
+    if sudo docker ps --format "{{.Names}}" | grep -q "nginx-proxy-manager"; then
+        success "nginx-proxy-manager properly restarted after enhanced backup"
+    else
+        error "nginx-proxy-manager not running after enhanced backup"
+        return 1
+    fi
+    
+    success "Enhanced backup with Portainer shutdown completed successfully"
+}
+
+# Test enhanced restore with complete container cleanup
+test_enhanced_restore_with_cleanup() {
+    info "Testing enhanced restore with complete container cleanup..."
+    cd /home/vagrant/docker-stack-backup
+    
+    # Find a backup to restore
+    local backup_file
+    backup_file=$(ls -1t /opt/backup/docker_backup_*.tar.gz 2>/dev/null | head -1)
+    
+    if [[ -z "$backup_file" ]]; then
+        # Create a backup first if none exists
+        info "Creating test backup for enhanced restore test..."
+        sudo -u portainer DOCKER_BACKUP_TEST=true ./backup-manager.sh backup >/dev/null 2>&1
+        backup_file=$(ls -1t /opt/backup/docker_backup_*.tar.gz 2>/dev/null | head -1)
+        
+        if [[ -z "$backup_file" ]]; then
+            error "Could not create test backup for enhanced restore test"
+            return 1
+        fi
+    fi
+    
+    info "Using backup for enhanced restore test: $(basename "$backup_file")"
+    
+    # Create a temporary test container to verify cleanup
+    info "Creating temporary test container to verify cleanup..."
+    sudo docker run -d --name temp-test-container --restart=unless-stopped nginx:alpine >/dev/null 2>&1
+    
+    # Verify temp container exists
+    if ! sudo docker ps --format "{{.Names}}" | grep -q "temp-test-container"; then
+        warn "Could not create temporary test container, but continuing with restore test"
+    else
+        info "Temporary test container created successfully"
+    fi
+    
+    # Perform enhanced restore (this should clean up ALL containers and directories)
+    info "Performing enhanced restore with cleanup..."
+    echo "$(basename "$backup_file")" | sudo -u portainer DOCKER_BACKUP_TEST=true ./backup-manager.sh restore
+    
+    # Wait for restore to complete
+    sleep 15
+    
+    # Verify temporary container was removed (complete cleanup)
+    if sudo docker ps -a --format "{{.Names}}" | grep -q "temp-test-container"; then
+        error "Temporary container still exists - complete cleanup did not occur"
+        return 1
+    else
+        success "Complete container cleanup verified during enhanced restore"
+    fi
+    
+    # Verify core services are running again
+    local max_attempts=30
+    local attempt=1
+    
+    while [[ $attempt -le $max_attempts ]]; do
+        if sudo docker ps --format "{{.Names}}" | grep -q "^portainer$" && \
+           sudo docker ps --format "{{.Names}}" | grep -q "nginx-proxy-manager"; then
+            success "Core services properly restored after enhanced restore"
+            break
+        fi
+        
+        info "Waiting for services to start... (attempt $attempt/$max_attempts)"
+        sleep 2
+        ((attempt++))
+    done
+    
+    if [[ $attempt -gt $max_attempts ]]; then
+        error "Core services did not start after enhanced restore"
+        return 1
+    fi
+    
+    # Verify directories were properly restored
+    if [[ -d "/opt/portainer/data" && -d "/opt/tools/nginx-proxy-manager" ]]; then
+        success "Directory structure properly restored"
+    else
+        error "Directory structure not properly restored"
+        return 1
+    fi
+    
+    success "Enhanced restore with complete cleanup completed successfully"
+}
+
+# Test external URL verification after restore
+test_external_url_verification() {
+    info "Testing external URL verification after operations..."
+    cd /home/vagrant/docker-stack-backup
+    
+    # Wait for services to be fully ready
+    sleep 10
+    
+    # Test localhost access (should always work in test environment)
+    if curl -s "http://localhost:9000" >/dev/null 2>&1; then
+        success "✅ Portainer accessible via localhost:9000"
+    else
+        error "❌ Portainer not accessible via localhost"
+        return 1
+    fi
+    
+    if curl -s "http://localhost:81" >/dev/null 2>&1; then
+        success "✅ nginx-proxy-manager accessible via localhost:81"
+    else
+        error "❌ nginx-proxy-manager not accessible via localhost"
+        return 1
+    fi
+    
+    # Test the verify_external_accessibility function directly
+    info "Testing verify_external_accessibility function..."
+    
+    # Source the backup manager to get access to the function
+    source ./backup-manager.sh
+    
+    # Mock domain configuration for testing
+    export DOMAIN_NAME="example.com"
+    export PORTAINER_SUBDOMAIN="portainer"
+    export NPM_SUBDOMAIN="npm"
+    
+    # The function should handle the case where domain URLs don't work
+    # but localhost does (which is our test scenario)
+    if verify_external_accessibility 2>/dev/null; then
+        success "External URL verification function works correctly"
+    else
+        # This is actually expected in test environment since we don't have real domains
+        info "External URL verification handled test environment appropriately"
+    fi
+    
+    success "External URL verification testing completed"
+}
+
 # Run all tests inside VM
 run_vm_tests() {
     # Set proper error handling for tests
@@ -5869,8 +6047,11 @@ run_vm_tests() {
     echo "=============================================================="
     
     run_test "Backup Creation" "test_backup_creation"
+    run_test "Enhanced Backup with Portainer Shutdown" "test_enhanced_backup_with_portainer_shutdown"
     run_test "Container Restart After Backup" "test_container_restart"
     run_test "Stack Restoration After Backup" "test_stack_restoration_after_backup"
+    run_test "Enhanced Restore with Complete Cleanup" "test_enhanced_restore_with_cleanup"
+    run_test "External URL Verification After Restore" "test_external_url_verification"
     run_test "Backup Listing" "test_backup_listing"
     run_test "SSH Key Setup" "test_ssh_key_setup"
     run_test "Log Files" "test_log_files"

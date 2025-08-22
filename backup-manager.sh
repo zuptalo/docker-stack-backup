@@ -2620,57 +2620,115 @@ get_stack_states() {
     success "Enhanced stack states captured: $stack_count stacks with complete configuration details"
 }
 
-# Stop containers gracefully (excluding Portainer)
-stop_containers() {
-    info "Stopping containers gracefully..."
-    info "Keeping Portainer running to manage backup process"
+# Gracefully stop all stacks through Portainer API
+gracefully_stop_all_stacks() {
+    info "Gracefully stopping all stacks through Portainer API..."
     
-    # Note: No need to track running containers for snapshot restore 
-    # We will restore only what's in the backup via Portainer API
-    
-    # Stop nginx-proxy-manager
-    if sudo -u "$PORTAINER_USER" docker ps | grep -q "nginx-proxy-manager"; then
-        sudo -u "$PORTAINER_USER" docker stop nginx-proxy-manager
-        info "Stopped nginx-proxy-manager"
+    # Check if we can access Portainer API
+    if ! curl -s "$PORTAINER_API_URL/status" >/dev/null 2>&1; then
+        warn "Portainer API not accessible, skipping graceful stack shutdown"
+        return 0
     fi
     
-    # Stop all other containers (excluding Portainer - keep it running for API management)
+    # Load credentials and authenticate
+    if [[ -f "$PORTAINER_PATH/.credentials" ]]; then
+        source "$PORTAINER_PATH/.credentials"
+        
+        local auth_response
+        auth_response=$(curl -s -X POST "$PORTAINER_API_URL/auth" \
+            -H "Content-Type: application/json" \
+            -d "{\"Username\": \"$PORTAINER_ADMIN_USERNAME\", \"Password\": \"$PORTAINER_ADMIN_PASSWORD\"}")
+        
+        local jwt_token
+        jwt_token=$(echo "$auth_response" | jq -r '.jwt // empty' 2>/dev/null)
+        
+        if [[ -n "$jwt_token" && "$jwt_token" != "null" ]]; then
+            # Get all stacks
+            local stacks_response
+            stacks_response=$(curl -s -H "Authorization: Bearer $jwt_token" "$PORTAINER_API_URL/stacks")
+            
+            # Stop each stack
+            echo "$stacks_response" | jq -r '.[].Id' 2>/dev/null | while read -r stack_id; do
+                if [[ -n "$stack_id" && "$stack_id" != "null" ]]; then
+                    local stack_name
+                    stack_name=$(echo "$stacks_response" | jq -r ".[] | select(.Id == $stack_id) | .Name" 2>/dev/null)
+                    info "Stopping stack: $stack_name (ID: $stack_id)"
+                    
+                    # Stop the stack
+                    curl -s -X POST -H "Authorization: Bearer $jwt_token" \
+                        "$PORTAINER_API_URL/stacks/$stack_id/stop" >/dev/null 2>&1 || true
+                fi
+            done
+            
+            # Give stacks time to stop gracefully
+            sleep 5
+        else
+            warn "Could not authenticate with Portainer API for graceful stack shutdown"
+        fi
+    else
+        warn "Portainer credentials not found, skipping graceful stack shutdown"
+    fi
+}
+
+# Stop containers gracefully for backup (including Portainer shutdown at end)
+stop_containers() {
+    info "Stopping all containers gracefully for backup..."
+    
+    # First, gracefully stop all stacks through Portainer API
+    gracefully_stop_all_stacks
+    
+    # Stop nginx-proxy-manager first (reverse proxy)
+    if sudo -u "$PORTAINER_USER" docker ps | grep -q "nginx-proxy-manager"; then
+        info "Stopping nginx-proxy-manager..."
+        cd "$TOOLS_PATH/nginx-proxy-manager"
+        sudo -u "$PORTAINER_USER" docker compose down
+        info "Stopped nginx-proxy-manager with compose down"
+    fi
+    
+    # Stop all other containers (excluding Portainer for now)
     local running_containers
-    running_containers=$(sudo -u "$PORTAINER_USER" docker ps --format "{{.Names}}")
+    running_containers=$(sudo -u "$PORTAINER_USER" docker ps --format "{{.Names}}" | grep -v "^portainer$")
     
     if [[ -n "$running_containers" ]]; then
-        # Stop each container except Portainer
+        info "Stopping remaining containers: $(echo "$running_containers" | tr '\n' ' ')"
         echo "$running_containers" | while read -r container_name; do
-            if [[ "$container_name" != "portainer" ]]; then
+            if [[ -n "$container_name" ]]; then
                 sudo -u "$PORTAINER_USER" docker stop "$container_name"
                 info "Stopped container: $container_name"
             fi
         done
     fi
     
-    success "Containers stopped gracefully (Portainer kept running)"
-}
-
-# Start containers
-start_containers() {
-    info "Starting containers..."
-    
-    # Check if Portainer is running, start it if not
-    if ! sudo -u "$PORTAINER_USER" docker ps --format "{{.Names}}" | grep -q "^portainer$"; then
-        warn "Portainer was stopped during backup, restarting..."
+    # Finally stop Portainer to ensure complete state capture
+    if sudo -u "$PORTAINER_USER" docker ps --format "{{.Names}}" | grep -q "^portainer$"; then
+        info "Stopping Portainer for complete backup state capture..."
         cd "$PORTAINER_PATH"
-        sudo -u "$PORTAINER_USER" docker compose up -d
-        sleep 15  # Give Portainer more time to start
-        info "Portainer restarted"
-    else
-        info "Portainer remained running during backup"
+        sudo -u "$PORTAINER_USER" docker compose down
+        info "Stopped Portainer with compose down"
     fi
     
-    # Start nginx-proxy-manager
+    success "All containers stopped gracefully for backup"
+}
+
+# Start containers after backup
+start_containers() {
+    info "Starting containers after backup..."
+    
+    # Start Portainer first
+    info "Starting Portainer..."
+    cd "$PORTAINER_PATH"
+    sudo -u "$PORTAINER_USER" docker compose up -d
+    
+    # Wait for Portainer to be fully ready
+    info "Waiting for Portainer to become responsive..."
+    wait_for_portainer_ready
+    
+    # Start nginx-proxy-manager (reverse proxy) first as it's critical for accessing everything
+    info "Starting nginx-proxy-manager (reverse proxy)..."
     cd "$TOOLS_PATH/nginx-proxy-manager"
     sudo -u "$PORTAINER_USER" docker compose up -d
     
-    # Wait a bit for services to be ready
+    # Wait a bit for NPM to be ready
     sleep 10
     
     success "Core containers started"
@@ -3377,6 +3435,242 @@ wait_for_portainer_ready() {
 }
 
 # Restore stacks from backup using Portainer API (only what's in backup)
+# Setup permissions after restore
+setup_permissions_after_restore() {
+    info "Setting up proper permissions after restore..."
+    
+    # Ensure portainer user owns the directories
+    sudo chown -R "$PORTAINER_USER:$PORTAINER_USER" "$PORTAINER_PATH" || true
+    sudo chown -R "$PORTAINER_USER:$PORTAINER_USER" "$TOOLS_PATH" || true
+    
+    # Set proper directory permissions
+    sudo chmod 755 "$PORTAINER_PATH" || true
+    sudo chmod 755 "$TOOLS_PATH" || true
+    
+    success "Permissions set up after restore"
+}
+
+# Restore stacks with proper startup sequence
+restore_stacks_with_startup_sequence() {
+    local stack_state_file="$1"
+    
+    if [[ ! -f "$stack_state_file" ]]; then
+        warn "Stack state file not found: $stack_state_file"
+        return 0
+    fi
+    
+    source "$PORTAINER_PATH/.credentials"
+    
+    # Login to Portainer API
+    local auth_response
+    auth_response=$(curl -s -X POST "$PORTAINER_API_URL/auth" \
+        -H "Content-Type: application/json" \
+        -d "{\"Username\": \"$PORTAINER_ADMIN_USERNAME\", \"Password\": \"$PORTAINER_ADMIN_PASSWORD\"}")
+    
+    local jwt_token
+    jwt_token=$(echo "$auth_response" | jq -r '.jwt // empty')
+    
+    if [[ -z "$jwt_token" ]]; then
+        error "Failed to authenticate with Portainer API"
+        return 1
+    fi
+    
+    # Get stacks from backup
+    local backup_stack_names
+    backup_stack_names=$(jq -r '.stacks[].name' "$stack_state_file" 2>/dev/null)
+    
+    if [[ -z "$backup_stack_names" ]]; then
+        info "No stacks found in backup to restore"
+        return 0
+    fi
+    
+    info "Restoring stacks with proper startup sequence: $(echo "$backup_stack_names" | tr '\n' ' ')"
+    
+    # Start nginx-proxy-manager first (reverse proxy)
+    if echo "$backup_stack_names" | grep -q "nginx-proxy-manager"; then
+        info "Starting nginx-proxy-manager first (reverse proxy)..."
+        restart_specific_stack "nginx-proxy-manager" "$stack_state_file" "$jwt_token"
+        
+        # Wait for NPM to be ready
+        sleep 15
+        info "nginx-proxy-manager startup completed"
+    fi
+    
+    # Start remaining stacks
+    echo "$backup_stack_names" | while read -r stack_name; do
+        if [[ -n "$stack_name" && "$stack_name" != "nginx-proxy-manager" ]]; then
+            info "Starting stack: $stack_name"
+            restart_specific_stack "$stack_name" "$stack_state_file" "$jwt_token"
+            sleep 5  # Brief pause between stack starts
+        fi
+    done
+    
+    success "Stack restoration with startup sequence completed"
+}
+
+# Restart a specific stack
+restart_specific_stack() {
+    local stack_name="$1"
+    local stack_state_file="$2"
+    local jwt_token="$3"
+    
+    # Get stack information from the state file
+    local stack_json
+    stack_json=$(jq -c ".stacks[] | select(.name == \"$stack_name\")" "$stack_state_file" 2>/dev/null)
+    
+    if [[ -z "$stack_json" || "$stack_json" == "null" ]]; then
+        warn "Stack $stack_name not found in backup state file"
+        return 1
+    fi
+    
+    local stack_status compose_content env_vars
+    stack_status=$(echo "$stack_json" | jq -r '.status')
+    compose_content=$(echo "$stack_json" | jq -r '.compose_file_content // empty')
+    env_vars=$(echo "$stack_json" | jq -r '.env_variables // []')
+    
+    # Only start stacks that were running
+    if [[ "$stack_status" == "1" ]]; then
+        info "Starting stack: $stack_name (was running in backup)"
+        
+        # Get current stacks to see if it exists
+        local current_stacks
+        current_stacks=$(curl -s -H "Authorization: Bearer $jwt_token" "$PORTAINER_API_URL/stacks")
+        
+        local stack_id
+        stack_id=$(echo "$current_stacks" | jq -r ".[] | select(.Name == \"$stack_name\") | .Id")
+        
+        if [[ -n "$stack_id" && "$stack_id" != "null" ]]; then
+            # Stack exists, start it
+            curl -s -X POST -H "Authorization: Bearer $jwt_token" \
+                "$PORTAINER_API_URL/stacks/$stack_id/start" >/dev/null 2>&1
+        else
+            # Stack doesn't exist, create it if we have compose content
+            if [[ -n "$compose_content" && "$compose_content" != "null" ]]; then
+                info "Creating stack $stack_name from backup compose content"
+                create_stack_from_compose_content "$stack_name" "$compose_content" "$env_vars" "$jwt_token"
+            else
+                warn "No compose content found for stack $stack_name, skipping creation"
+            fi
+        fi
+    else
+        info "Stack $stack_name was stopped in backup, not starting"
+    fi
+}
+
+# Create stack from compose content
+create_stack_from_compose_content() {
+    local stack_name="$1"
+    local compose_content="$2"
+    local env_vars="$3"
+    local jwt_token="$4"
+    
+    # Prepare the payload
+    local payload
+    payload=$(jq -n \
+        --arg name "$stack_name" \
+        --arg content "$compose_content" \
+        --argjson env "$env_vars" \
+        '{
+            "Name": $name,
+            "StackFileContent": $content,
+            "Env": $env
+        }')
+    
+    # Create the stack
+    curl -s -X POST "$PORTAINER_API_URL/stacks?type=2&method=string&endpointId=1" \
+        -H "Authorization: Bearer $jwt_token" \
+        -H "Content-Type: application/json" \
+        -d "$payload" >/dev/null 2>&1
+}
+
+# Verify external accessibility
+verify_external_accessibility() {
+    info "Verifying external accessibility of services..."
+    
+    local portainer_accessible=false
+    local npm_accessible=false
+    
+    # Check if we have domain configuration
+    if [[ -n "$DOMAIN_NAME" ]]; then
+        # Try to access Portainer via domain
+        if curl -s -k "https://$PORTAINER_SUBDOMAIN.$DOMAIN_NAME" >/dev/null 2>&1; then
+            success "✅ Portainer is accessible via https://$PORTAINER_SUBDOMAIN.$DOMAIN_NAME"
+            portainer_accessible=true
+        elif curl -s "http://$PORTAINER_SUBDOMAIN.$DOMAIN_NAME" >/dev/null 2>&1; then
+            success "✅ Portainer is accessible via http://$PORTAINER_SUBDOMAIN.$DOMAIN_NAME"
+            portainer_accessible=true
+        else
+            warn "❌ Portainer not accessible via domain"
+        fi
+        
+        # Try to access NPM via domain
+        if curl -s -k "https://$NPM_SUBDOMAIN.$DOMAIN_NAME" >/dev/null 2>&1; then
+            success "✅ nginx-proxy-manager is accessible via https://$NPM_SUBDOMAIN.$DOMAIN_NAME"
+            npm_accessible=true
+        elif curl -s "http://$NPM_SUBDOMAIN.$DOMAIN_NAME" >/dev/null 2>&1; then
+            success "✅ nginx-proxy-manager is accessible via http://$NPM_SUBDOMAIN.$DOMAIN_NAME"
+            npm_accessible=true
+        else
+            warn "❌ nginx-proxy-manager not accessible via domain"
+        fi
+    else
+        info "No domain configuration found, checking localhost access"
+    fi
+    
+    # Fallback to localhost checks
+    if [[ "$portainer_accessible" == "false" ]]; then
+        if curl -s "http://localhost:9000" >/dev/null 2>&1; then
+            info "✅ Portainer is accessible via localhost:9000"
+        else
+            warn "❌ Portainer not accessible via localhost"
+        fi
+    fi
+    
+    if [[ "$npm_accessible" == "false" ]]; then
+        if curl -s "http://localhost:81" >/dev/null 2>&1; then
+            info "✅ nginx-proxy-manager admin is accessible via localhost:81"
+        else
+            warn "❌ nginx-proxy-manager not accessible via localhost"
+        fi
+    fi
+}
+
+# Provide restore summary
+provide_restore_summary() {
+    local stack_state_file="$1"
+    
+    info "\n" "=== RESTORE SUMMARY ==="
+    
+    if [[ -f "$stack_state_file" ]]; then
+        local backup_timestamp backup_stack_count backup_stacks
+        backup_timestamp=$(jq -r '.timestamp // "Unknown"' "$stack_state_file" 2>/dev/null)
+        backup_stack_count=$(jq -r '.stacks | length' "$stack_state_file" 2>/dev/null)
+        backup_stacks=$(jq -r '.stacks[].name' "$stack_state_file" 2>/dev/null | tr '\n' ', ' | sed 's/,$//')
+        
+        info "📅 Backup created: $backup_timestamp"
+        info "📦 Stacks restored: $backup_stack_count"
+        info "🏗️  Stack names: $backup_stacks"
+    else
+        info "📦 Backup restored without stack state information"
+    fi
+    
+    info "\n" "=== SERVICE ACCESS ==="
+    if [[ -n "$DOMAIN_NAME" ]]; then
+        info "🌐 Portainer: https://$PORTAINER_SUBDOMAIN.$DOMAIN_NAME"
+        info "🌐 nginx-proxy-manager: https://$NPM_SUBDOMAIN.$DOMAIN_NAME"
+    else
+        info "🌐 Portainer: http://localhost:9000"
+        info "🌐 nginx-proxy-manager: http://localhost:81"
+    fi
+    
+    info "\n" "=== NOTES ==="
+    info "⏱️  Services may take a few minutes to fully initialize"
+    info "🔍 Check service logs if any issues occur: docker logs <container_name>"
+    info "📋 Use 'docker ps' to verify all containers are running"
+    
+    success "Restore completed successfully!"
+}
+
 restore_stacks_from_backup() {
     local stack_state_file="$1"
     
