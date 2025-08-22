@@ -216,9 +216,12 @@ curl -X PUT "http://localhost:9000/api/stacks/1" \
 Start all containers in a stack.
 
 ```bash
-curl -X POST "http://localhost:9000/api/stacks/1/start" \
+curl -X POST "http://localhost:9000/api/stacks/1/start?endpointId=1" \
   -H "Authorization: Bearer $JWT_TOKEN"
 ```
+
+**Parameters**:
+- `endpointId`: Docker environment ID (required, usually 1 for local)
 
 ### 7. Stop Stack
 
@@ -227,9 +230,12 @@ curl -X POST "http://localhost:9000/api/stacks/1/start" \
 Stop all containers in a stack.
 
 ```bash
-curl -X POST "http://localhost:9000/api/stacks/1/stop" \
+curl -X POST "http://localhost:9000/api/stacks/1/stop?endpointId=1" \
   -H "Authorization: Bearer $JWT_TOKEN"
 ```
+
+**Parameters**:
+- `endpointId`: Docker environment ID (required, usually 1 for local)
 
 ### 8. Delete Stack
 
@@ -431,7 +437,7 @@ echo "$STACKS" | jq -c '.[]' | while read -r stack; do
     echo "$STACK_FILE" > "backup_${STACK_NAME}_compose.json"
     
     # Stop stack for backup
-    curl -s -X POST "http://localhost:9000/api/stacks/$STACK_ID/stop" \
+    curl -s -X POST "http://localhost:9000/api/stacks/$STACK_ID/stop?endpointId=1" \
       -H "Authorization: Bearer $JWT_TOKEN"
 done
 ```

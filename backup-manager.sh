@@ -2792,11 +2792,11 @@ stop_containers() {
         
         info "Stopping stack: $stack_name (ID: $stack_id)"
         
-        # Use proper Stack Stop API endpoint as documented
+        # Use proper Stack Stop API endpoint as documented (requires endpointId parameter)
         local stop_response
         stop_response=$(curl -s --max-time 30 -X POST \
             -H "Authorization: Bearer $jwt_token" \
-            "http://localhost:9000/api/stacks/$stack_id/stop")
+            "http://localhost:9000/api/stacks/$stack_id/stop?endpointId=1")
         
         # Enhanced response handling
         if [[ $? -eq 0 ]]; then
@@ -2962,11 +2962,11 @@ start_single_stack() {
     
     info "Starting stack: $stack_name (ID: $stack_id)"
     
-    # Use proper Stack Start API endpoint
+    # Use proper Stack Start API endpoint (requires endpointId parameter)
     local start_response
     start_response=$(curl -s --max-time 30 -X POST \
         -H "Authorization: Bearer $jwt_token" \
-        "http://localhost:9000/api/stacks/$stack_id/start")
+        "http://localhost:9000/api/stacks/$stack_id/start?endpointId=1")
     
     if [[ $? -eq 0 ]]; then
         # Verify stack started successfully
