@@ -4027,15 +4027,15 @@ start_portainer_only() {
     info "Starting Portainer container..."
     
     # Check if Portainer container exists and is running
-    if docker ps --format "table {{.Names}}" | grep -q "^portainer$"; then
+    if sudo -u "$PORTAINER_USER" docker ps --format "table {{.Names}}" | grep -q "^portainer$"; then
         info "Portainer container already running"
         return 0
     fi
     
     # Check if Portainer container exists but is stopped
-    if docker ps -a --format "table {{.Names}}" | grep -q "^portainer$"; then
+    if sudo -u "$PORTAINER_USER" docker ps -a --format "table {{.Names}}" | grep -q "^portainer$"; then
         info "Starting existing Portainer container"
-        docker start portainer
+        sudo -u "$PORTAINER_USER" docker start portainer
         sleep 3
         return 0
     fi
@@ -5093,8 +5093,19 @@ restore_backup() {
     
     info "Restoring from backup: $backup_name"
     
-    # Stop containers
-    stop_containers
+    # Stop containers (gracefully handle Portainer API unavailability)
+    if ! stop_containers; then
+        info "Portainer API unavailable - will start Portainer during restore process"
+        # Stop any running containers directly since API is unavailable
+        info "Stopping any running containers directly..."
+        local containers_to_stop=($(sudo -u "$PORTAINER_USER" docker ps --format "table {{.Names}}" | grep -v "^NAMES$" | grep -v "portainer" || true))
+        for container in "${containers_to_stop[@]}"; do
+            if [[ -n "$container" ]]; then
+                info "Stopping container: $container"
+                sudo -u "$PORTAINER_USER" docker stop "$container" 2>/dev/null || warn "Failed to stop $container"
+            fi
+        done
+    fi
     
     # Create backup of current state
     local current_backup_name="pre_restore_$(date '+%Y%m%d_%H%M%S')"
