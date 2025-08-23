@@ -4575,10 +4575,14 @@ restore_critical_stacks_fallback() {
     # Get endpoint ID (usually 1 for local Docker)
     local endpoint_id=1
     
+    # Get current stacks to check for existing ones
+    local current_stacks_response
+    current_stacks_response=$(curl -s -H "Authorization: Bearer $jwt_token" "$PORTAINER_API_URL/stacks")
+    
     # Check for nginx-proxy-manager stack
     if [[ -d "$TOOLS_PATH/nginx-proxy-manager" && -f "$TOOLS_PATH/nginx-proxy-manager/docker-compose.yml" ]]; then
-        info "Detected nginx-proxy-manager data - creating stack..."
-        create_stack_from_compose "nginx-proxy-manager" "$TOOLS_PATH/nginx-proxy-manager/docker-compose.yml" "$jwt_token" "$endpoint_id"
+        info "Detected nginx-proxy-manager data - checking if stack exists..."
+        create_or_update_stack_from_compose "nginx-proxy-manager" "$TOOLS_PATH/nginx-proxy-manager/docker-compose.yml" "$jwt_token" "$endpoint_id" "$current_stacks_response"
     fi
     
     # Check for other common stacks
@@ -4592,8 +4596,8 @@ restore_critical_stacks_fallback() {
             if [[ -f "$stack_dir/docker-compose.yml" ]]; then
                 info "  Found docker-compose.yml: $stack_dir/docker-compose.yml"
                 if [[ "$stack_name" != "nginx-proxy-manager" ]]; then
-                    info "Detected $stack_name data - creating stack..."
-                    create_stack_from_compose "$stack_name" "$stack_dir/docker-compose.yml" "$jwt_token" "$endpoint_id"
+                    info "Detected $stack_name data - checking if stack exists..."
+                    create_or_update_stack_from_compose "$stack_name" "$stack_dir/docker-compose.yml" "$jwt_token" "$endpoint_id" "$current_stacks_response"
                 else
                     info "  Skipping nginx-proxy-manager (already processed)"
                 fi
@@ -4687,6 +4691,90 @@ $compose_content"
         # API-only approach as requested - no fallbacks to direct docker compose
         error "Failed to create stack via Portainer API: $stack_name"
         error "Check Portainer logs and network connectivity, then try again"
+        return 1
+    fi
+}
+
+# Create or update stack from compose file (checks if stack exists first)
+create_or_update_stack_from_compose() {
+    local stack_name="$1"
+    local compose_file="$2"
+    local jwt_token="$3"
+    local endpoint_id="$4"
+    local current_stacks_response="$5"
+    
+    # Check if stack already exists
+    local existing_stack_id=""
+    if [[ -n "$current_stacks_response" ]] && echo "$current_stacks_response" | jq -e . >/dev/null 2>&1; then
+        existing_stack_id=$(echo "$current_stacks_response" | jq -r ".[] | select(.Name == \"$stack_name\") | .Id")
+    fi
+    
+    if [[ -n "$existing_stack_id" && "$existing_stack_id" != "null" ]]; then
+        info "Stack '$stack_name' already exists (ID: $existing_stack_id) - updating instead of creating"
+        update_existing_stack_from_compose "$stack_name" "$existing_stack_id" "$compose_file" "$jwt_token" "$endpoint_id"
+    else
+        info "Stack '$stack_name' does not exist - creating new stack"
+        create_stack_from_compose "$stack_name" "$compose_file" "$jwt_token" "$endpoint_id"
+    fi
+}
+
+# Update existing stack from compose file
+update_existing_stack_from_compose() {
+    local stack_name="$1"
+    local stack_id="$2"
+    local compose_file="$3"
+    local jwt_token="$4"
+    local endpoint_id="$5"
+    
+    if [[ ! -f "$compose_file" ]]; then
+        warn "Compose file not found for $stack_name: $compose_file"
+        return 1
+    fi
+    
+    # Read and prepare compose content
+    local compose_content
+    compose_content=$(cat "$compose_file")
+    
+    # Ensure compose content has version key if missing
+    if ! echo "$compose_content" | grep -q "^version:"; then
+        compose_content="version: '3.8'
+$compose_content"
+        info "Added missing version key to compose content for update"
+    fi
+    
+    # Create update payload
+    local payload
+    payload=$(jq -n \
+        --arg compose "$compose_content" \
+        '{
+            StackFileContent: $compose,
+            Env: [],
+            Prune: false
+        }')
+    
+    info "Updating existing stack '$stack_name' (ID: $stack_id)"
+    
+    # Update stack via Portainer API
+    local update_response
+    update_response=$(curl -s -X PUT "$PORTAINER_API_URL/stacks/$stack_id?endpointId=$endpoint_id" \
+        -H "Authorization: Bearer $jwt_token" \
+        -H "Content-Type: application/json" \
+        -d "$payload")
+    
+    info "Update API Response length: ${#update_response}"
+    
+    if [[ -n "$update_response" ]] && echo "$update_response" | jq -e '.Id' >/dev/null 2>&1; then
+        success "Updated existing stack: $stack_name (ID: $stack_id)"
+    else
+        warn "Failed to update stack: $stack_name"
+        if [[ -n "$update_response" ]]; then
+            warn "Update API Response: $update_response"
+            local error_msg
+            error_msg=$(echo "$update_response" | jq -r '.message // .err // .error // "Unknown error"' 2>/dev/null || echo "Invalid JSON response")
+            warn "Error details: $error_msg"
+        else
+            warn "Empty API response for update"
+        fi
         return 1
     fi
 }
