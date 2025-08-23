@@ -3986,6 +3986,9 @@ implement_true_snapshot_restore() {
         restore_critical_stacks_fallback
     fi
     
+    # Step 4.5: Fix ownership and permissions after restoration
+    setup_permissions_after_restore
+    
     # Step 5: Final Portainer restart to ensure clean state
     info "Performing final Portainer restart for clean state..."
     restart_portainer_after_restore
@@ -4637,7 +4640,7 @@ create_stack_from_compose() {
         --arg compose "$compose_content" \
         '{
             Name: $name,
-            ComposeContent: $compose,
+            StackFileContent: $compose,
             Env: []
         }')
     
