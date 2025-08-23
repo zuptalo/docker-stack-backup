@@ -3551,12 +3551,71 @@ restore_enhanced_stacks() {
                         success "Restored stopped stack: $stack_name (kept in stopped state)"
                     fi
                 else
-                    info "Stack not found in current Portainer installation: $stack_name (skipping - deleted stacks are not recreated during restore)"
+                    info "Stack not found in current Portainer installation: $stack_name - creating from backup"
                     
-                    # Clean up any orphaned stack directory that may have been restored
-                    if [[ -d "$TOOLS_PATH/$stack_name" ]]; then
-                        warn "Removing orphaned stack directory: $TOOLS_PATH/$stack_name"
-                        sudo rm -rf "$TOOLS_PATH/$stack_name"
+                    # Create the stack from backup if we have compose content
+                    if [[ -n "$compose_content" && "$compose_content" != "null" && "$compose_content" != "" ]]; then
+                        info "Creating stack $stack_name from backup configuration"
+                        
+                        # Prepare stack creation payload
+                        local create_payload
+                        create_payload=$(jq -n \
+                            --arg name "$stack_name" \
+                            --arg compose "$compose_content" \
+                            --argjson env "$env_vars" \
+                            '{
+                                name: $name,
+                                stackFileContent: $compose,
+                                env: $env,
+                                fromAppTemplate: false
+                            }')
+                        
+                        # Create the stack via Portainer API
+                        local create_response
+                        create_response=$(curl -s -X POST "$PORTAINER_API_URL/stacks?type=2&method=string&endpointId=1" \
+                            -H "Authorization: Bearer $jwt_token" \
+                            -H "Content-Type: application/json" \
+                            -d "$create_payload")
+                        
+                        if echo "$create_response" | grep -q "error\|Error" 2>/dev/null; then
+                            warn "Failed to create stack: $stack_name - API Error: $create_response"
+                        else
+                            success "Successfully created stack: $stack_name from backup"
+                            
+                            # If it was originally running, verify it started
+                            if [[ "$status" == "running" ]]; then
+                                info "Verifying newly created stack is running: $stack_name"
+                                local retries=0
+                                local max_retries=6
+                                local containers_running=false
+                                
+                                while [[ $retries -lt $max_retries ]]; do
+                                    info "Attempt $((retries + 1))/$max_retries: Checking newly created stack $stack_name"
+                                    
+                                    if verify_stack_running_via_api "$jwt_token" "$stack_name"; then
+                                        containers_running=true
+                                        success "Newly created stack $stack_name verified running"
+                                        break
+                                    fi
+                                    
+                                    retries=$((retries + 1))
+                                    if [[ $retries -lt $max_retries ]]; then
+                                        sleep 10
+                                    fi
+                                done
+                                
+                                if [[ "$containers_running" != "true" ]]; then
+                                    warn "Newly created stack $stack_name may not be running properly"
+                                fi
+                            fi
+                        fi
+                    else
+                        warn "Cannot recreate stack $stack_name - no compose configuration in backup"
+                        # Clean up orphaned directory if it exists
+                        if [[ -d "$TOOLS_PATH/$stack_name" ]]; then
+                            warn "Removing orphaned stack directory: $TOOLS_PATH/$stack_name"
+                            sudo rm -rf "$TOOLS_PATH/$stack_name"
+                        fi
                     fi
                 fi
         done
@@ -3966,6 +4025,55 @@ stop_and_remove_all_containers() {
 # Start only Portainer container
 start_portainer_only() {
     info "Starting Portainer container..."
+    
+    # Check if Portainer container exists and is running
+    if docker ps --format "table {{.Names}}" | grep -q "^portainer$"; then
+        info "Portainer container already running"
+        return 0
+    fi
+    
+    # Check if Portainer container exists but is stopped
+    if docker ps -a --format "table {{.Names}}" | grep -q "^portainer$"; then
+        info "Starting existing Portainer container"
+        docker start portainer
+        sleep 3
+        return 0
+    fi
+    
+    # Portainer container doesn't exist - need to recreate it
+    warn "Portainer container missing - recreating from backup data"
+    
+    # Ensure Portainer directory structure exists
+    sudo mkdir -p "$PORTAINER_PATH"
+    sudo chown -R "$PORTAINER_USER:$PORTAINER_USER" "$PORTAINER_PATH"
+    
+    # Check if we have docker-compose.yml, if not create basic one
+    if [[ ! -f "$PORTAINER_PATH/docker-compose.yml" ]]; then
+        info "Creating Portainer docker-compose.yml"
+        sudo -u "$PORTAINER_USER" cat > "$PORTAINER_PATH/docker-compose.yml" << 'EOF'
+services:
+  portainer:
+    image: portainer/portainer-ce:latest
+    container_name: portainer
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./data:/data
+    ports:
+      - 9000:9000
+      - 9443:9443
+    networks:
+      - prod-network
+
+networks:
+  prod-network:
+    external: true
+EOF
+    fi
+    
     cd "$PORTAINER_PATH" || {
         error "Could not navigate to Portainer directory: $PORTAINER_PATH"
         return 1
