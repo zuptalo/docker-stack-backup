@@ -4636,23 +4636,32 @@ create_stack_from_compose() {
         endpoint_id=1
     fi
     
-    # Create stack payload with proper JSON formatting
+    # Ensure compose content has version key if missing
+    if ! echo "$compose_content" | grep -q "^version:"; then
+        compose_content="version: '3.8'
+$compose_content"
+        info "Added missing version key to compose content"
+    fi
+    
+    # Create stack payload with proper JSON formatting for the correct API endpoint
     local payload
     payload=$(jq -n \
         --arg name "$stack_name" \
         --arg compose "$compose_content" \
         '{
+            method: "string",
+            type: "standalone", 
             Name: $name,
             StackFileContent: $compose,
             Env: []
         }')
     
     info "Creating stack via API: $stack_name"
-    info "API URL: $PORTAINER_API_URL/stacks?type=2&method=string&endpointId=$endpoint_id"
+    info "API URL: $PORTAINER_API_URL/stacks/create/standalone/string?endpointId=$endpoint_id"
     
-    # Create stack via Portainer API
+    # Create stack via Portainer API using the correct endpoint
     local stack_response
-    stack_response=$(curl -s -X POST "$PORTAINER_API_URL/stacks?type=2&method=string&endpointId=$endpoint_id" \
+    stack_response=$(curl -s -X POST "$PORTAINER_API_URL/stacks/create/standalone/string?endpointId=$endpoint_id" \
         -H "Authorization: Bearer $jwt_token" \
         -H "Content-Type: application/json" \
         -d "$payload")
