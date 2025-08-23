@@ -4046,6 +4046,9 @@ start_portainer_only() {
     # Portainer container doesn't exist - need to recreate it
     warn "Portainer container missing - recreating from backup data"
     
+    # Ensure Docker network exists before creating Portainer
+    create_docker_network
+    
     # Ensure Portainer directory structure exists
     sudo mkdir -p "$PORTAINER_PATH"
     sudo chown -R "$PORTAINER_USER:$PORTAINER_USER" "$PORTAINER_PATH"
