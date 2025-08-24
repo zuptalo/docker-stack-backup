@@ -1431,7 +1431,7 @@ test_enhanced_post_operation_validation() {
     # Test stack state validation via API
     info "Testing stack state validation..."
     local jwt_token
-    if jwt_token=$(sudo -u portainer DOCKER_BACKUP_TEST=true /home/vagrant/docker-stack-backup/backup-manager.sh --source-only 2>/dev/null && authenticate_portainer_api 2>/dev/null); then
+    if jwt_token=$(sudo -u portainer DOCKER_BACKUP_TEST=true /home/vagrant/docker-stack-backup/backup-manager.sh --source-only 2>/dev/null && authenticate_portainer_api "http://localhost:9000/api" 2>/dev/null); then
         if [[ -n "$jwt_token" ]]; then
             local stacks_response
             stacks_response=$(curl -s --max-time 10 -H "Authorization: Bearer $jwt_token" "http://localhost:9000/api/stacks" 2>/dev/null)

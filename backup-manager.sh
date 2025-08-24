@@ -278,7 +278,7 @@ validate_portainer_service() {
     # Check Portainer authentication
     if [[ -f "${PORTAINER_PATH}/.credentials" ]]; then
         local jwt_token
-        jwt_token=$(authenticate_portainer_api)
+        jwt_token=$(authenticate_portainer_api "http://localhost:9000/api")
         if [[ -z "$jwt_token" ]]; then
             errors+=("Portainer API authentication failed")
         fi
@@ -295,8 +295,8 @@ validate_directory_structure() {
         if [[ -n "$dir" ]]; then
             if [[ ! -d "$dir" ]]; then
                 errors+=("Required directory does not exist: $dir")
-            elif [[ ! -w "$dir" ]]; then
-                errors+=("Required directory is not writable: $dir")
+            elif ! sudo -u "$PORTAINER_USER" test -w "$dir" 2>/dev/null; then
+                errors+=("Required directory is not writable by $PORTAINER_USER: $dir")
             fi
         fi
     done
@@ -364,7 +364,7 @@ validate_services_post_backup() {
     
     # Check that stacks are in expected state
     local jwt_token
-    jwt_token=$(authenticate_portainer_api 2>/dev/null)
+    jwt_token=$(authenticate_portainer_api "http://localhost:9000/api" 2>/dev/null)
     if [[ -n "$jwt_token" ]]; then
         local stacks_response
         stacks_response=$(curl -s --max-time 10 -H "Authorization: Bearer $jwt_token" \
@@ -465,7 +465,7 @@ validate_stack_states() {
     local jwt_token
     local auth_attempts=0
     while [[ $auth_attempts -lt 3 ]]; do
-        jwt_token=$(authenticate_portainer_api 2>/dev/null)
+        jwt_token=$(authenticate_portainer_api "http://localhost:9000/api" 2>/dev/null)
         if [[ -n "$jwt_token" ]]; then
             break
         fi
@@ -2190,9 +2190,9 @@ create_directories() {
     
     # Set backup directory permissions for system-wide access
     # - Root ownership for security
-    # - 755 permissions so portainer user can read/write backup files
-    sudo chown root:root "$BACKUP_PATH"
-    sudo chmod 755 "$BACKUP_PATH"
+    # - 775 permissions so portainer user can read/write backup files
+    sudo chown root:"$PORTAINER_USER" "$BACKUP_PATH"
+    sudo chmod 775 "$BACKUP_PATH"
     
     # Create nginx-proxy-manager subdirectory
     sudo mkdir -p "$TOOLS_PATH/nginx-proxy-manager"
