@@ -122,8 +122,8 @@ show_progress() {
     local delay=0.1
     local spin=0
     
-    # Only show progress in interactive mode
-    if [[ "${QUIET_MODE:-false}" == "true" ]] || [[ "${NON_INTERACTIVE:-false}" == "true" ]]; then
+    # Only show progress in interactive mode and not in test environment
+    if [[ "${QUIET_MODE:-false}" == "true" ]] || [[ "${NON_INTERACTIVE:-false}" == "true" ]] || is_test_environment; then
         return 0
     fi
     
@@ -141,8 +141,14 @@ show_progress_bar() {
     local message="$3"
     local width=50
     
-    # Only show progress in interactive mode
-    if [[ "${QUIET_MODE:-false}" == "true" ]] || [[ "${NON_INTERACTIVE:-false}" == "true" ]]; then
+    # Only show progress in interactive mode and not in test environment
+    if [[ "${QUIET_MODE:-false}" == "true" ]] || [[ "${NON_INTERACTIVE:-false}" == "true" ]] || is_test_environment; then
+        return 0
+    fi
+    
+    # Prevent division by zero
+    if [[ $total -eq 0 ]]; then
+        printf "\r%s [complete]\n" "$message"
         return 0
     fi
     
@@ -150,9 +156,17 @@ show_progress_bar() {
     local filled=$((current * width / total))
     local empty=$((width - filled))
     
+    # Ensure non-negative values
+    if [[ $filled -lt 0 ]]; then filled=0; fi
+    if [[ $empty -lt 0 ]]; then empty=0; fi
+    
     printf "\r%s [" "$message"
-    printf "%*s" $filled | tr ' ' '█'
-    printf "%*s" $empty | tr ' ' '░'
+    if [[ $filled -gt 0 ]]; then
+        printf "%*s" $filled | tr ' ' '='
+    fi
+    if [[ $empty -gt 0 ]]; then
+        printf "%*s" $empty | tr ' ' ' '
+    fi
     printf "] %d%% (%d/%d)" $percentage $current $total
     
     if [[ $current -eq $total ]]; then
@@ -164,8 +178,9 @@ start_progress_monitor() {
     local operation="$1"
     local estimated_time="${2:-unknown}"
     
-    # Only show progress in interactive mode
-    if [[ "${QUIET_MODE:-false}" == "true" ]] || [[ "${NON_INTERACTIVE:-false}" == "true" ]]; then
+    # Only show progress in interactive mode and not in test environment
+    if [[ "${QUIET_MODE:-false}" == "true" ]] || [[ "${NON_INTERACTIVE:-false}" == "true" ]] || is_test_environment; then
+        echo ""  # Return empty string instead of PID
         return 0
     fi
     
@@ -201,13 +216,18 @@ stop_progress_monitor() {
     local monitor_pid=$1
     local final_message="$2"
     
+    # Handle empty PID (from disabled progress monitors)
+    if [[ -z "$monitor_pid" ]]; then
+        return 0
+    fi
+    
     if [[ -n "$monitor_pid" ]] && kill -0 "$monitor_pid" 2>/dev/null; then
         kill "$monitor_pid" 2>/dev/null
         wait "$monitor_pid" 2>/dev/null
     fi
     
-    # Only show final message in interactive mode
-    if [[ "${QUIET_MODE:-false}" != "true" ]] && [[ "${NON_INTERACTIVE:-false}" != "true" ]]; then
+    # Only show final message in interactive mode and not in test environment
+    if [[ "${QUIET_MODE:-false}" != "true" ]] && [[ "${NON_INTERACTIVE:-false}" != "true" ]] && ! is_test_environment; then
         printf "\r%s ✓\n" "$final_message"
     fi
 }
@@ -343,10 +363,10 @@ validate_docker_service() {
         errors+=("Docker daemon is not running")
     fi
     
-    # Check Docker socket permissions
+    # Check Docker socket permissions - test with portainer user if available
     if [[ ! -S "/var/run/docker.sock" ]]; then
         errors+=("Docker socket not available")
-    elif [[ ! -r "/var/run/docker.sock" ]]; then
+    elif ! sudo -u "${PORTAINER_USER:-root}" docker ps >/dev/null 2>&1; then
         errors+=("Docker socket not readable - check user permissions")
     fi
     
@@ -368,8 +388,8 @@ validate_docker_service() {
 validate_portainer_service() {
     local errors=()
     
-    # Check Portainer container is running
-    if ! docker ps --format "table {{.Names}}" | grep -q "^portainer$"; then
+    # Check Portainer container is running - use appropriate user context
+    if ! sudo -u "${PORTAINER_USER:-root}" docker ps --format "table {{.Names}}" 2>/dev/null | grep -q "^portainer$"; then
         errors+=("Portainer container is not running")
     fi
     
@@ -423,7 +443,7 @@ validate_service_endpoints() {
     fi
     
     # Check nginx-proxy-manager if it should be running
-    if docker ps --format "table {{.Names}}" | grep -q "nginx-proxy-manager"; then
+    if sudo -u "${PORTAINER_USER:-root}" docker ps --format "table {{.Names}}" 2>/dev/null | grep -q "nginx-proxy-manager"; then
         if ! curl -s --max-time 10 "http://localhost:81" >/dev/null 2>&1; then
             errors+=("nginx-proxy-manager web interface not accessible")
         fi
@@ -2177,13 +2197,16 @@ setup_ssh_keys() {
     
     # Generate Ed25519 SSH key pair (modern, secure, and compact)
     info "Generating Ed25519 SSH key pair..."
-    sudo -u "$PORTAINER_USER" ssh-keygen -t ed25519 -f "$ssh_key_path" -N ""
+    # Remove existing keys to avoid prompts - use sudo to ensure removal
+    sudo rm -f "$ssh_key_path" "$ssh_pub_path" 2>/dev/null || true
+    # Generate key without prompts
+    sudo -u "$PORTAINER_USER" ssh-keygen -t ed25519 -f "$ssh_key_path" -N "" -q
     success "Ed25519 SSH key pair generated"
     
     # Set up SSH access for backups
     if ! is_test_environment; then
         # Restricted SSH access for production
-        local public_key_content=$(cat "$ssh_pub_path")
+        local public_key_content=$(sudo -u "$PORTAINER_USER" cat "$ssh_pub_path")
         sudo -u "$PORTAINER_USER" tee "$auth_keys_path" > /dev/null << EOF
 # Restricted key for backup access only
 command="rsync --server --daemon .",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty $public_key_content
@@ -2727,15 +2750,11 @@ EOF
     # Wait for Portainer to be ready
     info "Waiting for Portainer to start..."
     
-    # Start progress monitor for Portainer startup
-    local portainer_progress_pid=$(start_progress_monitor "Starting Portainer service" "1-3min")
-    
     local max_attempts=12
     local attempt=1
     
     while [[ $attempt -le $max_attempts ]]; do
         if sudo -u "$PORTAINER_USER" docker ps | grep -q "portainer" && curl -s -f "http://localhost:9000/api/system/status" >/dev/null 2>&1; then
-            stop_progress_monitor "$portainer_progress_pid" "Portainer service started"
             success "Portainer deployed successfully"
             info "Portainer URL: https://$PORTAINER_URL"
             
@@ -2747,9 +2766,6 @@ EOF
         sleep 10
         ((attempt++))
     done
-    
-    # Handle timeout case
-    stop_progress_monitor "$portainer_progress_pid" "Portainer startup timeout"
     
     # Even if the API check fails, if the container is running, consider it a success
     if sudo -u "$PORTAINER_USER" docker ps | grep -q "portainer"; then
@@ -4985,6 +5001,8 @@ restart_portainer_after_restore() {
 
 # Create backup
 create_backup() {
+    local custom_name="${1:-}"
+    
     info "Starting backup process..."
     
     # Create operation lock and recovery info
@@ -4992,7 +5010,16 @@ create_backup() {
     create_recovery_info "backup"
     
     local timestamp=$(date '+%Y%m%d_%H%M%S')
+    
+    # Construct backup name with optional custom postfix
     local backup_name="docker_backup_${timestamp}"
+    if [[ -n "$custom_name" ]]; then
+        # Sanitize custom name (replace spaces and special characters with hyphens)
+        local sanitized_name=$(echo "$custom_name" | sed 's/[^a-zA-Z0-9._-]/-/g' | sed 's/-\+/-/g' | sed 's/^-\|-$//g')
+        backup_name="${backup_name}-${sanitized_name}"
+        info "Creating custom backup: ${backup_name}"
+    fi
+    
     local temp_backup_dir="/tmp/${backup_name}"
     local final_backup_file="$BACKUP_PATH/${backup_name}.tar.gz"
     
@@ -6781,12 +6808,14 @@ Creates a complete backup including:
 - System metadata for reliable restoration
 
 ${BLUE}USAGE:${NC}
-    $0 [FLAGS] backup
+    $0 [FLAGS] backup [CUSTOM_NAME]
     
 ${BLUE}EXAMPLES:${NC}
     $0 backup                     # Interactive backup with prompts
+    $0 backup fresh-state         # Custom backup with name postfix
+    $0 backup pre-upgrade         # Custom backup before upgrades
     $0 --quiet backup             # Minimal output
-    $0 --yes backup               # Auto-confirm backup creation
+    $0 --yes backup full-backup   # Auto-confirm with custom name
 
 ${BLUE}BACKUP PROCESS:${NC}
     1. Capture running stack states via Portainer API
@@ -6798,6 +6827,7 @@ ${BLUE}BACKUP PROCESS:${NC}
 ${BLUE}BACKUP LOCATION:${NC}
     • Default: /opt/backup/
     • Format: docker_backup_YYYYMMDD_HHMMSS.tar.gz
+    • Custom: docker_backup_YYYYMMDD_HHMMSS-CUSTOM_NAME.tar.gz
     • Retention: 7 days (configurable)
     
 ${BLUE}TROUBLESHOOTING:${NC}
@@ -7384,79 +7414,21 @@ main() {
             create_recovery_info "setup"
             
             # Setup doesn't need to load config - it creates it
-            local setup_steps=(
-                "Installing dependencies"
-                "Configuring system settings"
-                "Verifying DNS and SSL"
-                "Installing Docker"
-                "Creating system user"
-                "Setting up directories"
-                "Creating Docker network"
-                "Preparing service files"
-                "Deploying Portainer"
-                "Configuring reverse proxy"
-                "Validating SSH setup"
-            )
-            
-            local total_steps=${#setup_steps[@]}
-            local current_step=0
-            
-            # Step 1/11
-            ((current_step++))
-            show_progress_bar $current_step $total_steps "${setup_steps[0]}"
             install_dependencies
-            
-            # Step 2/11
-            ((current_step++))
-            show_progress_bar $current_step $total_steps "${setup_steps[1]}"
             setup_fixed_configuration
-            
-            # Step 3/11
-            ((current_step++))
-            show_progress_bar $current_step $total_steps "${setup_steps[2]}"
             verify_dns_and_ssl
-            
-            # Step 4/11
-            ((current_step++))
-            show_progress_bar $current_step $total_steps "${setup_steps[3]}"
             install_docker
-            
-            # Step 5/11
-            ((current_step++))
-            show_progress_bar $current_step $total_steps "${setup_steps[4]}"
             create_portainer_user
-            
-            # Step 6/11
-            ((current_step++))
-            show_progress_bar $current_step $total_steps "${setup_steps[5]}"
             create_directories
-            
-            # Step 7/11
-            ((current_step++))
-            show_progress_bar $current_step $total_steps "${setup_steps[6]}"
             create_docker_network
-            
-            # Step 8/11
-            ((current_step++))
-            show_progress_bar $current_step $total_steps "${setup_steps[7]}"
             prepare_nginx_proxy_manager_files
-            
-            # Step 9/11
-            ((current_step++))
-            show_progress_bar $current_step $total_steps "${setup_steps[8]}"
             deploy_portainer
             # NPM must be deployed as a Portainer stack - no fallback
             info "nginx-proxy-manager will be configured after Portainer stack deployment"
             
-            # Step 10/11
-            ((current_step++))
-            show_progress_bar $current_step $total_steps "${setup_steps[9]}"
             # Configure nginx-proxy-manager proxy hosts
             configure_nginx_proxy_manager
             
-            # Step 11/11
-            ((current_step++))
-            show_progress_bar $current_step $total_steps "${setup_steps[10]}"
             # Validate SSH setup for NAS backup functionality
             if validate_ssh_setup; then
                 success "SSH key validation passed - NAS backup functionality ready"
@@ -7486,7 +7458,7 @@ main() {
                 if is_test_environment; then
                     printf "  • Portainer:              %b\n" "${GREEN}http://localhost:9000${NC} (test environment)"
                 else
-                    printf "  • Portainer:              %b\n" "${YELLOW}http://${PORTAINER_URL:-"portainer.domain.com"}${NC} (configure DNS for HTTPS)"
+                    printf "  • Portainer:              %b\n" "${YELLOW}http://${PORTAINER_URL#https://}${NC} (configure DNS for HTTPS)"
                 fi
             fi
             
@@ -7519,10 +7491,11 @@ main() {
                 show_command_help "backup"
                 exit 0
             fi
+            local custom_name="${2:-}"
             install_dependencies
             load_config
             check_setup_required "backup" || return 1
-            create_backup
+            create_backup "$custom_name"
             ;;
         restore)
             if [[ "$help_requested" == "true" ]]; then
