@@ -108,6 +108,109 @@ info() { log "INFO" "$*"; }
 warn() { log "WARN" "${YELLOW}$*${NC}"; }
 error() { log "ERROR" "${RED}$*${NC}"; }
 success() { log "SUCCESS" "${GREEN}$*${NC}"; }
+verbose() { 
+    if [[ "${VERBOSE_MODE:-false}" == "true" ]]; then
+        log "VERBOSE" "${CYAN}$*${NC}"
+    fi
+}
+
+# Progress feedback functions
+show_progress() {
+    local pid=$1
+    local message="$2"
+    local spinner_chars="⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+    local delay=0.1
+    local spin=0
+    
+    # Only show progress in interactive mode
+    if [[ "${QUIET_MODE:-false}" == "true" ]] || [[ "${NON_INTERACTIVE:-false}" == "true" ]]; then
+        return 0
+    fi
+    
+    printf "%s" "$message"
+    while kill -0 "$pid" 2>/dev/null; do
+        printf "\r%s %s" "$message" "${spinner_chars:spin++%${#spinner_chars}:1}"
+        sleep $delay
+    done
+    printf "\r%s ✓\n" "$message"
+}
+
+show_progress_bar() {
+    local current=$1
+    local total=$2
+    local message="$3"
+    local width=50
+    
+    # Only show progress in interactive mode
+    if [[ "${QUIET_MODE:-false}" == "true" ]] || [[ "${NON_INTERACTIVE:-false}" == "true" ]]; then
+        return 0
+    fi
+    
+    local percentage=$((current * 100 / total))
+    local filled=$((current * width / total))
+    local empty=$((width - filled))
+    
+    printf "\r%s [" "$message"
+    printf "%*s" $filled | tr ' ' '█'
+    printf "%*s" $empty | tr ' ' '░'
+    printf "] %d%% (%d/%d)" $percentage $current $total
+    
+    if [[ $current -eq $total ]]; then
+        printf "\n"
+    fi
+}
+
+start_progress_monitor() {
+    local operation="$1"
+    local estimated_time="${2:-unknown}"
+    
+    # Only show progress in interactive mode
+    if [[ "${QUIET_MODE:-false}" == "true" ]] || [[ "${NON_INTERACTIVE:-false}" == "true" ]]; then
+        return 0
+    fi
+    
+    {
+        local start_time=$(date +%s)
+        local spinner_chars="⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+        local spin=0
+        
+        while true; do
+            local current_time=$(date +%s)
+            local elapsed=$((current_time - start_time))
+            local mins=$((elapsed / 60))
+            local secs=$((elapsed % 60))
+            
+            if [[ "$estimated_time" != "unknown" ]]; then
+                printf "\r%s %s [%02d:%02d / ~%s]" \
+                    "$operation" "${spinner_chars:spin++%${#spinner_chars}:1}" \
+                    "$mins" "$secs" "$estimated_time"
+            else
+                printf "\r%s %s [%02d:%02d]" \
+                    "$operation" "${spinner_chars:spin++%${#spinner_chars}:1}" \
+                    "$mins" "$secs"
+            fi
+            
+            sleep 0.1
+        done
+    } &
+    
+    echo $!
+}
+
+stop_progress_monitor() {
+    local monitor_pid=$1
+    local final_message="$2"
+    
+    if [[ -n "$monitor_pid" ]] && kill -0 "$monitor_pid" 2>/dev/null; then
+        kill "$monitor_pid" 2>/dev/null
+        wait "$monitor_pid" 2>/dev/null
+    fi
+    
+    # Only show final message in interactive mode
+    if [[ "${QUIET_MODE:-false}" != "true" ]] && [[ "${NON_INTERACTIVE:-false}" != "true" ]]; then
+        printf "\r%s ✓\n" "$final_message"
+    fi
+}
 
 # Error handling
 # Enhanced cleanup and error recovery
@@ -2624,11 +2727,15 @@ EOF
     # Wait for Portainer to be ready
     info "Waiting for Portainer to start..."
     
+    # Start progress monitor for Portainer startup
+    local portainer_progress_pid=$(start_progress_monitor "Starting Portainer service" "1-3min")
+    
     local max_attempts=12
     local attempt=1
     
     while [[ $attempt -le $max_attempts ]]; do
         if sudo -u "$PORTAINER_USER" docker ps | grep -q "portainer" && curl -s -f "http://localhost:9000/api/system/status" >/dev/null 2>&1; then
+            stop_progress_monitor "$portainer_progress_pid" "Portainer service started"
             success "Portainer deployed successfully"
             info "Portainer URL: https://$PORTAINER_URL"
             
@@ -2640,6 +2747,9 @@ EOF
         sleep 10
         ((attempt++))
     done
+    
+    # Handle timeout case
+    stop_progress_monitor "$portainer_progress_pid" "Portainer startup timeout"
     
     # Even if the API check fails, if the container is running, consider it a success
     if sudo -u "$PORTAINER_USER" docker ps | grep -q "portainer"; then
@@ -4934,31 +5044,47 @@ create_backup() {
     
     # Create backup with preserved permissions  
     cd /
+    
+    # Start progress monitor for backup creation
+    local progress_pid=$(start_progress_monitor "Creating backup archive" "2-5min")
+    
+    verbose "Creating backup archive at: $final_backup_file"
+    verbose "Including directories: $PORTAINER_PATH and active stack dirs"
+    
     if [[ -f "$temp_backup_dir/stack_states.json" ]] || [[ -f "$temp_backup_dir/backup_metadata.json" ]]; then
+        verbose "Using multi-stage archive creation (tar + additional files + compression)"
         # Create uncompressed tar first, add additional files, then compress
         sudo tar --same-owner --same-permissions -cf "${final_backup_file%.gz}" \
             "$(echo $PORTAINER_PATH | sed 's|^/||')" \
             $active_stack_dirs
         
+        verbose "Base archive created, adding additional files..."
         # Add stack states if available
         if [[ -f "$temp_backup_dir/stack_states.json" ]]; then
+            verbose "Adding stack states configuration..."
             sudo tar --same-owner --same-permissions -rf "${final_backup_file%.gz}" \
                 -C "$temp_backup_dir" stack_states.json
         fi
         
         # Add metadata file if available
         if [[ -f "$temp_backup_dir/backup_metadata.json" ]]; then
+            verbose "Adding backup metadata..."
             sudo tar --same-owner --same-permissions -rf "${final_backup_file%.gz}" \
                 -C "$temp_backup_dir" backup_metadata.json
         fi
         
+        verbose "Compressing final archive..."
         sudo gzip "${final_backup_file%.gz}"
     else
+        verbose "Using single-stage compressed archive creation"
         # Create compressed tar directly if no additional files
         sudo tar --same-owner --same-permissions -czf "$final_backup_file" \
             "$(echo $PORTAINER_PATH | sed 's|^/||')" \
             $active_stack_dirs
     fi
+    
+    # Stop progress monitor
+    stop_progress_monitor "$progress_pid" "Backup archive created successfully"
     
     # Ensure backup file has correct ownership
     sudo chown "$PORTAINER_USER:$PORTAINER_USER" "$final_backup_file"
@@ -5226,11 +5352,19 @@ restore_backup() {
     # Extract backup
     info "Extracting backup..."
     cd /
+    
+    # Start progress monitor for backup extraction
+    local extract_progress_pid=$(start_progress_monitor "Extracting backup archive" "3-8min")
+    
     if ! sudo tar --same-owner --same-permissions -xzf "$selected_backup"; then
+        stop_progress_monitor "$extract_progress_pid" "Backup extraction failed"
         error "Failed to extract backup archive"
         error "The backup file may be corrupted or you may not have sufficient permissions"
         return 1
     fi
+    
+    # Stop progress monitor
+    stop_progress_monitor "$extract_progress_pid" "Backup extracted successfully"
     
     # Check for metadata file and use it for enhanced restoration
     local metadata_file="/tmp/backup_metadata.json"
@@ -6487,6 +6621,7 @@ ${BLUE}═══ FLAGS ═══${NC}
     ${BLUE}--yes, -y${NC}               # Auto-answer 'yes' to all prompts
     ${BLUE}--non-interactive, -n${NC}   # Run in non-interactive mode (use defaults)
     ${BLUE}--quiet, -q${NC}             # Minimize output
+    ${BLUE}--verbose${NC}               # Show detailed operation progress
     ${BLUE}--config-file=PATH${NC}      # Load configuration from file
     ${BLUE}--timeout=SECONDS${NC}       # Set prompt timeout (default: 60)
     ${BLUE}--help, -h${NC}              # Show this help message
@@ -7162,6 +7297,10 @@ main() {
                 QUIET_MODE="true"
                 shift
                 ;;
+            --verbose)
+                VERBOSE_MODE="true"
+                shift
+                ;;
             --timeout=*)
                 PROMPT_TIMEOUT="${1#*=}"
                 shift
@@ -7245,21 +7384,79 @@ main() {
             create_recovery_info "setup"
             
             # Setup doesn't need to load config - it creates it
+            local setup_steps=(
+                "Installing dependencies"
+                "Configuring system settings"
+                "Verifying DNS and SSL"
+                "Installing Docker"
+                "Creating system user"
+                "Setting up directories"
+                "Creating Docker network"
+                "Preparing service files"
+                "Deploying Portainer"
+                "Configuring reverse proxy"
+                "Validating SSH setup"
+            )
+            
+            local total_steps=${#setup_steps[@]}
+            local current_step=0
+            
+            # Step 1/11
+            ((current_step++))
+            show_progress_bar $current_step $total_steps "${setup_steps[0]}"
             install_dependencies
+            
+            # Step 2/11
+            ((current_step++))
+            show_progress_bar $current_step $total_steps "${setup_steps[1]}"
             setup_fixed_configuration
+            
+            # Step 3/11
+            ((current_step++))
+            show_progress_bar $current_step $total_steps "${setup_steps[2]}"
             verify_dns_and_ssl
+            
+            # Step 4/11
+            ((current_step++))
+            show_progress_bar $current_step $total_steps "${setup_steps[3]}"
             install_docker
+            
+            # Step 5/11
+            ((current_step++))
+            show_progress_bar $current_step $total_steps "${setup_steps[4]}"
             create_portainer_user
+            
+            # Step 6/11
+            ((current_step++))
+            show_progress_bar $current_step $total_steps "${setup_steps[5]}"
             create_directories
+            
+            # Step 7/11
+            ((current_step++))
+            show_progress_bar $current_step $total_steps "${setup_steps[6]}"
             create_docker_network
+            
+            # Step 8/11
+            ((current_step++))
+            show_progress_bar $current_step $total_steps "${setup_steps[7]}"
             prepare_nginx_proxy_manager_files
+            
+            # Step 9/11
+            ((current_step++))
+            show_progress_bar $current_step $total_steps "${setup_steps[8]}"
             deploy_portainer
             # NPM must be deployed as a Portainer stack - no fallback
             info "nginx-proxy-manager will be configured after Portainer stack deployment"
             
+            # Step 10/11
+            ((current_step++))
+            show_progress_bar $current_step $total_steps "${setup_steps[9]}"
             # Configure nginx-proxy-manager proxy hosts
             configure_nginx_proxy_manager
             
+            # Step 11/11
+            ((current_step++))
+            show_progress_bar $current_step $total_steps "${setup_steps[10]}"
             # Validate SSH setup for NAS backup functionality
             if validate_ssh_setup; then
                 success "SSH key validation passed - NAS backup functionality ready"
