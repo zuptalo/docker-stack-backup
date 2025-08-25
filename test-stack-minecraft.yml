@@ -1,0 +1,22 @@
+services:
+  minecraft:
+    image: itzg/minecraft-bedrock-server
+    container_name: minecraft
+    environment:
+      EULA: "TRUE"
+      GAMEMODE: "creative"
+      DIFFICULTY: "peaceful"
+      ALLOW_CHEATS: "true"
+      SERVER_NAME: "Zuptalo Server"
+      ONLINE_MODE: "true"
+      ENABLE_QUERY: "true"
+    networks:
+      - prod-network
+    volumes:
+      - /opt/tools/minecraft:/data
+      - /etc/localtime:/etc/localtime:ro
+    restart: unless-stopped
+    
+networks:
+  prod-network:
+    external: true
