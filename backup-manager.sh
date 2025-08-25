@@ -12,6 +12,7 @@ LOG_FILE="/var/log/docker-backup-manager.log"
 
 # Default configuration
 DEFAULT_PORTAINER_PATH="/opt/portainer"
+DEFAULT_NPM_PATH="/opt/nginx-proxy-manager"
 DEFAULT_TOOLS_PATH="/opt/tools"
 DEFAULT_BACKUP_PATH="/opt/backup"
 DEFAULT_BACKUP_RETENTION=7
@@ -1055,6 +1056,7 @@ load_config() {
     
     # Set other defaults
     PORTAINER_PATH="${PORTAINER_PATH:-$DEFAULT_PORTAINER_PATH}"
+    NPM_PATH="${NPM_PATH:-$DEFAULT_NPM_PATH}"
     TOOLS_PATH="${TOOLS_PATH:-$DEFAULT_TOOLS_PATH}"
     BACKUP_PATH="${BACKUP_PATH:-$DEFAULT_BACKUP_PATH}"
     BACKUP_RETENTION="${BACKUP_RETENTION:-$DEFAULT_BACKUP_RETENTION}"
@@ -1073,6 +1075,7 @@ save_config() {
     sudo tee "$config_file_to_save" > /dev/null << EOF
 # Docker Backup Manager Configuration
 PORTAINER_PATH="$PORTAINER_PATH"
+NPM_PATH="$NPM_PATH"
 TOOLS_PATH="$TOOLS_PATH"
 BACKUP_PATH="$BACKUP_PATH"
 BACKUP_RETENTION="$BACKUP_RETENTION"
@@ -2310,8 +2313,8 @@ validate_ssh_setup() {
 create_directories() {
     info "Creating required directories..."
     
-    # Create Portainer and tools directories (owned by portainer user)
-    local portainer_dirs=("$PORTAINER_PATH" "$TOOLS_PATH")
+    # Create Portainer, NPM, and tools directories (owned by portainer user)
+    local portainer_dirs=("$PORTAINER_PATH" "$NPM_PATH" "$TOOLS_PATH")
     
     for dir in "${portainer_dirs[@]}"; do
         if [[ ! -d "$dir" ]]; then
@@ -2335,12 +2338,12 @@ create_directories() {
     sudo chown root:"$PORTAINER_USER" "$BACKUP_PATH"
     sudo chmod 775 "$BACKUP_PATH"
     
-    # Create nginx-proxy-manager subdirectory
-    sudo mkdir -p "$TOOLS_PATH/nginx-proxy-manager"
-    sudo chown -R "$PORTAINER_USER:$PORTAINER_USER" "$TOOLS_PATH/nginx-proxy-manager"
+    # Create nginx-proxy-manager directory (separate from tools)
+    sudo mkdir -p "$NPM_PATH"
+    sudo chown -R "$PORTAINER_USER:$PORTAINER_USER" "$NPM_PATH"
     
     success "Directories created with proper permissions"
-    info "  - $PORTAINER_PATH and $TOOLS_PATH: owned by $PORTAINER_USER"
+    info "  - $PORTAINER_PATH, $NPM_PATH, and $TOOLS_PATH: owned by $PORTAINER_USER"
     info "  - $BACKUP_PATH: system-wide location with root ownership"
 }
 
@@ -2366,7 +2369,7 @@ generate_password() {
 prepare_nginx_proxy_manager_files() {
     info "Preparing nginx-proxy-manager files..."
     
-    local npm_path="$TOOLS_PATH/nginx-proxy-manager"
+    local npm_path="$NPM_PATH"
     
     # Create docker-compose.yml for nginx-proxy-manager with absolute paths
     sudo -u "$PORTAINER_USER" tee "$npm_path/docker-compose.yml" > /dev/null << EOF
@@ -2913,7 +2916,7 @@ create_npm_stack_in_portainer() {
     info "Using endpoint ID: $endpoint_id"
     
     # Create NPM stack using proper API format
-    local npm_compose_content=$(cat "$TOOLS_PATH/nginx-proxy-manager/docker-compose.yml")
+    local npm_compose_content=$(cat "$NPM_PATH/docker-compose.yml")
     
     local stack_response
     stack_response=$(curl -s -X POST "$PORTAINER_API_URL/stacks/create/standalone/string?endpointId=$endpoint_id" \
@@ -4835,10 +4838,10 @@ restore_critical_stacks_fallback() {
     local current_stacks_response
     current_stacks_response=$(curl -s -H "Authorization: Bearer $jwt_token" "$PORTAINER_API_URL/stacks")
     
-    # Check for nginx-proxy-manager stack
-    if [[ -d "$TOOLS_PATH/nginx-proxy-manager" && -f "$TOOLS_PATH/nginx-proxy-manager/docker-compose.yml" ]]; then
+    # Check for nginx-proxy-manager stack (in dedicated NPM directory)
+    if [[ -d "$NPM_PATH" && -f "$NPM_PATH/docker-compose.yml" ]]; then
         info "Detected nginx-proxy-manager data - checking if stack exists..."
-        create_or_update_stack_from_compose "nginx-proxy-manager" "$TOOLS_PATH/nginx-proxy-manager/docker-compose.yml" "$jwt_token" "$endpoint_id" "$current_stacks_response"
+        create_or_update_stack_from_compose "nginx-proxy-manager" "$NPM_PATH/docker-compose.yml" "$jwt_token" "$endpoint_id" "$current_stacks_response"
     fi
     
     # Check for other common stacks
@@ -5184,17 +5187,24 @@ create_backup() {
         if [[ -n "$stack_names" ]]; then
             info "Identified active stacks for backup: $(echo "$stack_names" | tr '\n' ' ')"
             while read -r stack_name; do
-                if [[ -n "$stack_name" ]] && [[ -d "$TOOLS_PATH/$stack_name" ]]; then
-                    active_stack_dirs="$active_stack_dirs $(echo "$TOOLS_PATH/$stack_name" | sed 's|^/||')"
+                if [[ -n "$stack_name" ]]; then
+                    # nginx-proxy-manager is in NPM_PATH, others are in TOOLS_PATH
+                    if [[ "$stack_name" == "nginx-proxy-manager" ]]; then
+                        if [[ -d "$NPM_PATH" ]]; then
+                            active_stack_dirs="$active_stack_dirs $(echo "$NPM_PATH" | sed 's|^/||')"
+                        fi
+                    elif [[ -d "$TOOLS_PATH/$stack_name" ]]; then
+                        active_stack_dirs="$active_stack_dirs $(echo "$TOOLS_PATH/$stack_name" | sed 's|^/||')"
+                    fi
                 fi
             done <<< "$stack_names"
         fi
     fi
     
-    # If no active stacks found or stack states unavailable, backup all of tools directory
+    # If no active stacks found or stack states unavailable, backup all directories
     if [[ -z "$active_stack_dirs" ]]; then
-        warn "No active stack directories identified, backing up entire tools directory"
-        active_stack_dirs="$(echo $TOOLS_PATH | sed 's|^/||')"
+        warn "No active stack directories identified, backing up NPM and entire tools directory"
+        active_stack_dirs="$(echo $NPM_PATH | sed 's|^/||') $(echo $TOOLS_PATH | sed 's|^/||')"
     else
         info "Backing up only active stack directories to ensure clean restore"
     fi
@@ -5497,11 +5507,16 @@ cleanup_system_for_restore() {
         sudo -u "$PORTAINER_USER" docker network create prod-network || true
     fi
     
-    info "Completely cleaning portainer and tools directories..."
+    info "Completely cleaning portainer, nginx-proxy-manager, and tools directories..."
     
     # Remove all contents from portainer directory
     if [[ -d "$PORTAINER_PATH" ]]; then
         sudo rm -rf "$PORTAINER_PATH"/*
+    fi
+    
+    # Remove all contents from nginx-proxy-manager directory
+    if [[ -d "$NPM_PATH" ]]; then
+        sudo rm -rf "$NPM_PATH"/*
     fi
     
     # Remove all contents from tools directory
@@ -5510,8 +5525,8 @@ cleanup_system_for_restore() {
     fi
     
     # Ensure directories exist with proper ownership
-    sudo mkdir -p "$PORTAINER_PATH" "$TOOLS_PATH"
-    sudo chown -R "$PORTAINER_USER:$PORTAINER_USER" "$PORTAINER_PATH" "$TOOLS_PATH"
+    sudo mkdir -p "$PORTAINER_PATH" "$NPM_PATH" "$TOOLS_PATH"
+    sudo chown -R "$PORTAINER_USER:$PORTAINER_USER" "$PORTAINER_PATH" "$NPM_PATH" "$TOOLS_PATH"
 }
 
 # Extract backup cleanly with proper error handling and user management
