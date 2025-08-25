@@ -6511,6 +6511,8 @@ uninstall_system() {
     echo "  • All Docker images, volumes, and networks"
     echo "  • All configuration files in /opt/portainer and /opt/tools"
     echo "  • All backup data in /opt/backup (unless you choose to keep it)"
+    echo "  • The 'portainer' system user and its home directory"
+    echo "  • All cron jobs and scheduled backups"
     echo "  • Docker system will be completely cleaned"
     echo
     printf "%b\n" "${RED}⚠️  This action CANNOT be undone!${NC}"
@@ -6549,35 +6551,26 @@ uninstall_system() {
     echo
     
     # Step 1: Stop and remove all containers
-    info "Step 1/6: Stopping all Docker containers..."
-    if docker ps -q | xargs -r docker stop; then
+    info "Step 1/7: Stopping all Docker containers..."
+    if sudo docker ps -q | xargs -r sudo docker stop; then
         success "All containers stopped"
     else
         warn "Some containers may have already been stopped"
     fi
     
     info "Removing all Docker containers..."
-    if docker ps -aq | xargs -r docker rm -f; then
+    if sudo docker ps -aq | xargs -r sudo docker rm -f; then
         success "All containers removed"
     else
         warn "No containers to remove or some removal failed"
     fi
     
-    # Step 2: Remove Docker networks (except defaults)
-    info "Step 2/6: Cleaning up Docker networks..."
-    # Remove prod-network specifically
-    if docker network inspect prod-network >/dev/null 2>&1; then
-        docker network rm prod-network && success "Removed prod-network"
-    fi
-    # Remove other custom networks
-    docker network ls --filter type=custom -q | xargs -r docker network rm && success "Custom networks cleaned"
+    # Step 2: Complete Docker system cleanup
+    info "Step 2/7: Performing complete Docker system cleanup..."
+    sudo docker system prune -af --volumes && success "Docker system completely cleaned"
     
-    # Step 3: Remove Docker images, volumes, and system cleanup
-    info "Step 3/6: Performing complete Docker system cleanup..."
-    docker system prune -af --volumes && success "Docker system completely cleaned"
-    
-    # Step 4: Remove configuration directories
-    info "Step 4/6: Removing configuration directories..."
+    # Step 3: Remove configuration directories
+    info "Step 3/7: Removing configuration directories..."
     
     if [[ -d "/opt/portainer" ]]; then
         sudo rm -rf /opt/portainer && success "Removed /opt/portainer"
@@ -6591,8 +6584,8 @@ uninstall_system() {
         info "/opt/tools directory not found"
     fi
     
-    # Step 5: Handle backup directory (optional)
-    info "Step 5/6: Handling backup data..."
+    # Step 4: Handle backup directory (optional)
+    info "Step 4/7: Handling backup data..."
     if [[ -d "/opt/backup" ]]; then
         if prompt_yes_no "Do you want to keep backup data in /opt/backup?" "y"; then
             info "Backup data preserved in /opt/backup"
@@ -6603,22 +6596,35 @@ uninstall_system() {
         info "/opt/backup directory not found"
     fi
     
-    # Step 6: Remove configuration files
-    info "Step 6/6: Removing configuration files..."
-    if [[ -f "/etc/docker-backup-manager.conf" ]]; then
-        sudo rm -f /etc/docker-backup-manager.conf && success "Removed /etc/docker-backup-manager.conf"
-    else
-        info "Configuration file not found"
-    fi
-    
-    # Remove cron jobs
+    # Step 5: Remove cron jobs (before removing portainer user)
+    info "Step 5/7: Cleaning up cron jobs..."
     if command -v crontab >/dev/null 2>&1; then
-        if sudo -u portainer crontab -l 2>/dev/null | grep -q "docker-backup-manager"; then
+        # Remove portainer cron jobs before deleting user
+        if id "portainer" >/dev/null 2>&1 && sudo -u portainer crontab -l 2>/dev/null | grep -q "docker-backup-manager"; then
             sudo -u portainer crontab -r 2>/dev/null && success "Removed portainer user cron jobs"
         fi
         if crontab -l 2>/dev/null | grep -q "docker-backup-manager"; then
             warn "Found backup-manager cron jobs for current user - you may want to remove them manually"
+        else
+            info "No cron jobs found for current user"
         fi
+    fi
+    
+    # Step 6: Remove portainer user and home directory
+    info "Step 6/7: Removing portainer system user..."
+    if id "portainer" >/dev/null 2>&1; then
+        # Remove user and home directory
+        sudo userdel -r portainer 2>/dev/null && success "Removed portainer user and home directory"
+    else
+        info "Portainer user not found"
+    fi
+    
+    # Step 7: Remove configuration files
+    info "Step 7/7: Removing configuration files..."
+    if [[ -f "/etc/docker-backup-manager.conf" ]]; then
+        sudo rm -f /etc/docker-backup-manager.conf && success "Removed /etc/docker-backup-manager.conf"
+    else
+        info "Configuration file not found"
     fi
     
     echo
@@ -6628,7 +6634,7 @@ uninstall_system() {
     printf "%b\n" "${BLUE}💡 Next steps:${NC}"
     echo "  • Docker is still installed and ready for fresh setup"
     echo "  • Run './backup-manager.sh setup' to reinstall the system"
-    echo "  • The 'portainer' system user is still available for reuse"
+    echo "  • A new 'portainer' system user will be created during setup"
     echo
     if [[ -d "/opt/backup" ]]; then
         info "Backup data was preserved and will be available after reinstall"
