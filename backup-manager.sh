@@ -6564,12 +6564,13 @@ uninstall_system() {
     echo
     printf "%b\n" "${YELLOW}This command will completely remove:${NC}"
     echo "  • All Docker containers (Portainer, nginx-proxy-manager, user stacks)"
-    echo "  • All Docker images, volumes, and networks"
+    echo "  • All Docker volumes, networks, and dangling images"
     echo "  • All configuration files in /opt/portainer and /opt/tools"
     echo "  • All backup data in /opt/backup (unless you choose to keep it)"
     echo "  • The 'portainer' system user and its home directory"
     echo "  • All cron jobs and scheduled backups"
-    echo "  • Docker system will be completely cleaned"
+    echo
+    printf "%b\n" "${GREEN}✅ Docker images will be preserved for faster reinstalls${NC}"
     echo
     printf "%b\n" "${RED}⚠️  This action CANNOT be undone!${NC}"
     echo
@@ -6621,9 +6622,10 @@ uninstall_system() {
         warn "No containers to remove or some removal failed"
     fi
     
-    # Step 2: Complete Docker system cleanup
-    info "Step 2/7: Performing complete Docker system cleanup..."
-    sudo docker system prune -af --volumes && success "Docker system completely cleaned"
+    # Step 2: Docker cleanup (preserving images)
+    info "Step 2/7: Cleaning Docker resources (preserving images)..."
+    info "Removing unused volumes, networks, and dangling images..."
+    sudo docker system prune -f --volumes && success "Docker system cleaned (images preserved)"
     
     # Step 3: Remove configuration directories
     info "Step 3/7: Removing configuration directories..."
@@ -6689,6 +6691,7 @@ uninstall_system() {
     echo
     printf "%b\n" "${BLUE}💡 Next steps:${NC}"
     echo "  • Docker is still installed and ready for fresh setup"
+    echo "  • Docker images have been preserved for faster reinstalls"
     echo "  • Run './backup-manager.sh setup' to reinstall the system"
     echo "  • A new 'portainer' system user will be created during setup"
     echo
