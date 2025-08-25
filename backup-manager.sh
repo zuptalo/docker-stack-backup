@@ -4092,25 +4092,51 @@ implement_snapshot_restore() {
     fi
 }
 
-# Implement true snapshot restore: clean system and restore only backup contents
+# Start Portainer from restored data using docker-compose
+start_portainer_from_restored_data() {
+    info "Starting Portainer from restored configuration..."
+    
+    # Check if Portainer compose file exists in restored data
+    local portainer_compose="$PORTAINER_PATH/docker-compose.yml"
+    
+    if [[ ! -f "$portainer_compose" ]]; then
+        error "Portainer docker-compose.yml not found in restored data"
+        error "Expected file: $portainer_compose"
+        return 1
+    fi
+    
+    # Start Portainer using the restored compose file
+    info "Starting Portainer using restored compose configuration..."
+    cd "$PORTAINER_PATH"
+    
+    # Ensure portainer user owns the files
+    sudo chown -R "$PORTAINER_USER:$PORTAINER_USER" "$PORTAINER_PATH"
+    
+    # Start Portainer with the portainer user
+    if ! sudo -u "$PORTAINER_USER" docker compose up -d; then
+        error "Failed to start Portainer from restored configuration"
+        return 1
+    fi
+    
+    success "Portainer started successfully from restored data"
+    return 0
+}
+
+# Implement true snapshot restore: start services and restore stack states
 implement_true_snapshot_restore() {
     local selected_backup="$1"
     
-    info "Implementing true snapshot restore - cleaning system and restoring only backup contents..."
+    info "Starting restored services and configuring stack states..."
     
-    # Step 1: Stop and remove ALL containers (except Portainer which we need for API calls)
-    info "Stopping and removing all containers (except Portainer)..."
-    stop_and_remove_all_containers
+    # Step 1: Start Portainer from restored data
+    info "Starting Portainer with restored configuration..."
+    start_portainer_from_restored_data
     
-    # Step 2: Start only Portainer to have API access
-    info "Starting Portainer for API management..."
-    start_portainer_only
-    
-    # Step 3: Wait for Portainer to be ready
+    # Step 2: Wait for Portainer to be ready
     info "Waiting for Portainer to be ready..."
     wait_for_portainer_ready
     
-    # Step 4: Extract and process stack states from backup
+    # Step 3: Extract and process stack states from backup to restore stacks
     local stack_state_file="/tmp/stack_states.json"
     if tar -tf "$selected_backup" | grep -q "stack_states.json"; then
         sudo tar -xzf "$selected_backup" -C /tmp stack_states.json 2>/dev/null || true
@@ -4119,18 +4145,13 @@ implement_true_snapshot_restore() {
             restore_stacks_from_backup "$stack_state_file"
             sudo rm -f "$stack_state_file"
         else
-            warn "No stack state file found in backup - using fallback detection"
-            restore_critical_stacks_fallback
+            warn "No stack state file found in backup - stacks will need to be deployed manually"
         fi
     else
-        warn "Backup does not contain stack states - using fallback detection"
-        restore_critical_stacks_fallback
+        warn "Backup does not contain stack states - stacks will need to be deployed manually"
     fi
     
-    # Step 4.5: Fix ownership and permissions after restoration
-    setup_permissions_after_restore
-    
-    # Step 5: Final Portainer restart to ensure clean state
+    # Step 4: Final Portainer restart to ensure clean state
     info "Performing final Portainer restart for clean state..."
     restart_portainer_after_restore
 }
@@ -4625,6 +4646,61 @@ provide_restore_summary() {
     success "Restore completed successfully!"
 }
 
+# Deploy a single stack from backup using Portainer API
+deploy_stack_from_backup() {
+    local stack_name="$1"
+    local stack_state_file="$2" 
+    local jwt_token="$3"
+    
+    # Extract stack configuration from backup
+    local stack_config
+    stack_config=$(jq -r ".stacks[] | select(.name == \"$stack_name\")" "$stack_state_file" 2>/dev/null)
+    
+    if [[ -z "$stack_config" || "$stack_config" == "null" ]]; then
+        warn "Stack configuration not found for: $stack_name"
+        return 1
+    fi
+    
+    # Extract the compose file content
+    local compose_content
+    compose_content=$(echo "$stack_config" | jq -r '.compose_content // empty' 2>/dev/null)
+    
+    if [[ -z "$compose_content" || "$compose_content" == "null" ]]; then
+        warn "No compose content found for stack: $stack_name"
+        return 1
+    fi
+    
+    # Extract environment variables
+    local env_vars
+    env_vars=$(echo "$stack_config" | jq -c '.env // []' 2>/dev/null)
+    
+    # Create the stack using Portainer API
+    info "Creating stack: $stack_name via Portainer API"
+    local create_response
+    create_response=$(curl -s -X POST "$PORTAINER_API_URL/stacks" \
+        -H "Authorization: Bearer $jwt_token" \
+        -H "Content-Type: application/json" \
+        -d "{
+            \"name\": \"$stack_name\",
+            \"composeFile\": $(echo "$compose_content" | jq -Rs .),
+            \"env\": $env_vars,
+            \"endpointId\": 1
+        }")
+    
+    # Check if stack creation was successful
+    local stack_id
+    stack_id=$(echo "$create_response" | jq -r '.Id // empty' 2>/dev/null)
+    
+    if [[ -n "$stack_id" && "$stack_id" != "null" ]]; then
+        success "Stack '$stack_name' deployed successfully (ID: $stack_id)"
+        return 0
+    else
+        # Log the error response for debugging
+        warn "Failed to deploy stack '$stack_name'. API response: $create_response"
+        return 1
+    fi
+}
+
 restore_stacks_from_backup() {
     local stack_state_file="$1"
     
@@ -4633,19 +4709,43 @@ restore_stacks_from_backup() {
         return 0
     fi
     
+    # Load Portainer credentials
+    if [[ ! -f "$PORTAINER_PATH/.credentials" ]]; then
+        error "Portainer credentials file not found: $PORTAINER_PATH/.credentials"
+        return 1
+    fi
+    
     source "$PORTAINER_PATH/.credentials"
     
-    # Login to Portainer API
-    local auth_response
-    auth_response=$(curl -s -X POST "$PORTAINER_API_URL/auth" \
-        -H "Content-Type: application/json" \
-        -d "{\"Username\": \"$PORTAINER_ADMIN_USERNAME\", \"Password\": \"$PORTAINER_ADMIN_PASSWORD\"}")
+    # Authenticate with Portainer API with retry logic
+    local jwt_token=""
+    local auth_attempts=0
+    local max_auth_attempts=5
     
-    local jwt_token
-    jwt_token=$(echo "$auth_response" | jq -r '.jwt // empty')
+    while [[ $auth_attempts -lt $max_auth_attempts && -z "$jwt_token" ]]; do
+        info "Authenticating with Portainer API (attempt $((auth_attempts + 1))/$max_auth_attempts)..."
+        local auth_response
+        auth_response=$(curl -s -X POST "$PORTAINER_API_URL/auth" \
+            -H "Content-Type: application/json" \
+            -d "{\"Username\": \"$PORTAINER_ADMIN_USERNAME\", \"Password\": \"$PORTAINER_ADMIN_PASSWORD\"}")
+        
+        if [[ -n "$auth_response" ]]; then
+            jwt_token=$(echo "$auth_response" | jq -r '.jwt // empty' 2>/dev/null)
+            if [[ -n "$jwt_token" && "$jwt_token" != "null" && "$jwt_token" != "empty" ]]; then
+                info "Successfully authenticated with Portainer API"
+                break
+            fi
+        fi
+        
+        auth_attempts=$((auth_attempts + 1))
+        if [[ $auth_attempts -lt $max_auth_attempts ]]; then
+            info "Waiting 10 seconds before retry..."
+            sleep 10
+        fi
+    done
     
-    if [[ -z "$jwt_token" ]]; then
-        error "Failed to authenticate with Portainer API"
+    if [[ -z "$jwt_token" || "$jwt_token" == "null" || "$jwt_token" == "empty" ]]; then
+        error "Failed to authenticate with Portainer API after $max_auth_attempts attempts"
         return 1
     fi
     
@@ -4658,10 +4758,15 @@ restore_stacks_from_backup() {
         return 0
     fi
     
-    info "Restoring stacks from backup: $(echo "$backup_stack_names" | tr '\n' ' ')"
+    info "Deploying stacks from backup: $(echo "$backup_stack_names" | tr '\n' ' ')"
     
-    # Use the existing restart_stacks function but ensure we start fresh
-    restart_stacks "$stack_state_file"
+    # Deploy each stack from the backup using Portainer API
+    echo "$backup_stack_names" | while read -r stack_name; do
+        if [[ -n "$stack_name" ]]; then
+            info "Deploying stack: $stack_name"
+            deploy_stack_from_backup "$stack_name" "$stack_state_file" "$jwt_token"
+        fi
+    done
     
     success "Stack restoration from backup completed"
 }
@@ -5359,6 +5464,74 @@ list_backups() {
     return 0
 }
 
+# Clean up system for restore - remove all containers and clean directories
+cleanup_system_for_restore() {
+    info "Stopping all running containers..."
+    
+    # Stop all containers including Portainer (we'll restart it later)
+    local all_containers
+    all_containers=$(sudo -u "$PORTAINER_USER" docker ps -q)
+    
+    if [[ -n "$all_containers" ]]; then
+        info "Stopping containers: $all_containers"
+        sudo -u "$PORTAINER_USER" docker stop $all_containers || warn "Some containers failed to stop gracefully"
+    fi
+    
+    info "Removing all containers..."
+    all_containers=$(sudo -u "$PORTAINER_USER" docker ps -aq)
+    
+    if [[ -n "$all_containers" ]]; then
+        info "Removing containers: $all_containers"
+        sudo -u "$PORTAINER_USER" docker rm -f $all_containers || warn "Some containers failed to be removed"
+    fi
+    
+    info "Cleaning up docker volumes, networks, and system..."
+    sudo -u "$PORTAINER_USER" docker volume prune -f || true
+    sudo -u "$PORTAINER_USER" docker network prune -f || true
+    sudo -u "$PORTAINER_USER" docker system prune -f || true
+    
+    info "Completely cleaning portainer and tools directories..."
+    
+    # Remove all contents from portainer directory except the backup script expects the structure
+    if [[ -d "$PORTAINER_PATH" ]]; then
+        sudo rm -rf "$PORTAINER_PATH"/*
+    fi
+    
+    # Remove all contents from tools directory
+    if [[ -d "$TOOLS_PATH" ]]; then
+        sudo rm -rf "$TOOLS_PATH"/*
+    fi
+    
+    # Ensure directories exist with proper ownership
+    sudo mkdir -p "$PORTAINER_PATH" "$TOOLS_PATH"
+    sudo chown -R "$PORTAINER_USER:$PORTAINER_USER" "$PORTAINER_PATH" "$TOOLS_PATH"
+}
+
+# Extract backup cleanly with proper error handling and user management
+extract_backup_cleanly() {
+    local selected_backup="$1"
+    
+    info "Extracting backup: $(basename "$selected_backup")"
+    cd /
+    
+    # Start progress monitor for backup extraction
+    local extract_progress_pid=$(start_progress_monitor "Extracting backup archive" "3-8min")
+    
+    if ! sudo tar --same-owner --same-permissions -xzf "$selected_backup"; then
+        stop_progress_monitor "$extract_progress_pid" "Backup extraction failed"
+        error "Failed to extract backup archive"
+        error "The backup file may be corrupted or you may not have sufficient permissions"
+        return 1
+    fi
+    
+    # Stop progress monitor
+    stop_progress_monitor "$extract_progress_pid" "Backup extracted successfully"
+    
+    # Ensure proper ownership after extraction
+    info "Setting proper ownership after extraction..."
+    sudo chown -R "$PORTAINER_USER:$PORTAINER_USER" "$PORTAINER_PATH" "$TOOLS_PATH" || warn "Failed to set ownership on some files"
+}
+
 # Restore from backup
 restore_backup() {
     # Create operation lock and recovery info
@@ -5419,35 +5592,13 @@ restore_backup() {
         done
     fi
     
-    # Create backup of current state
-    local current_backup_name="pre_restore_$(date '+%Y%m%d_%H%M%S')"
-    info "Creating backup of current state: $current_backup_name"
-    cd /
-    if ! sudo tar --same-owner --same-permissions -czf "$BACKUP_PATH/${current_backup_name}.tar.gz" \
-        "$(echo $PORTAINER_PATH | sed 's|^/||')" \
-        "$(echo $TOOLS_PATH | sed 's|^/||')" 2>/dev/null; then
-        warn "Failed to create pre-restore backup, continuing with restore anyway"
-    else
-        # Fix ownership of pre-restore backup to portainer user
-        sudo chown "$PORTAINER_USER:$PORTAINER_USER" "$BACKUP_PATH/${current_backup_name}.tar.gz"
-    fi
+    # Clean up existing containers and directories before restore
+    info "Cleaning up system before restore..."
+    cleanup_system_for_restore
     
-    # Extract backup
-    info "Extracting backup..."
-    cd /
-    
-    # Start progress monitor for backup extraction
-    local extract_progress_pid=$(start_progress_monitor "Extracting backup archive" "3-8min")
-    
-    if ! sudo tar --same-owner --same-permissions -xzf "$selected_backup"; then
-        stop_progress_monitor "$extract_progress_pid" "Backup extraction failed"
-        error "Failed to extract backup archive"
-        error "The backup file may be corrupted or you may not have sufficient permissions"
-        return 1
-    fi
-    
-    # Stop progress monitor
-    stop_progress_monitor "$extract_progress_pid" "Backup extracted successfully"
+    # Extract backup to clean directories
+    info "Extracting backup to clean directories..."
+    extract_backup_cleanly "$selected_backup"
     
     # Check for metadata file and use it for enhanced restoration
     local metadata_file="/tmp/backup_metadata.json"

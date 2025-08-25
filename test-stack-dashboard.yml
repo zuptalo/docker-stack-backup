@@ -1,0 +1,20 @@
+services:
+  dashboard:
+    image: pawelmalak/flame:multiarch2.3.1
+    container_name: dashboard
+    volumes:
+      - /opt/tools/dashboard:/app/data
+    environment:
+      - PASSWORD=PHa-589-UN8-I7M
+    restart: unless-stopped
+    networks:
+      - prod-network
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:5005" ]
+      interval: 10s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+networks:
+  prod-network:
+    external: true
