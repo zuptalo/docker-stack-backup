@@ -6497,6 +6497,97 @@ test_enhanced_backup_with_portainer_shutdown() {
     success "Enhanced backup with Portainer shutdown completed successfully"
 }
 
+# Test improved restore process without pre-restore backup generation
+test_improved_restore_no_prebackup() {
+    info "Testing improved restore process (no pre-restore backup generation)..."
+    cd /home/vagrant/docker-stack-backup
+    
+    # Count current backups
+    local backup_count_before
+    backup_count_before=$(ls -1 /opt/backup/docker_backup_*.tar.gz 2>/dev/null | wc -l)
+    
+    # Find a backup to restore
+    local backup_file
+    backup_file=$(ls -1t /opt/backup/docker_backup_*.tar.gz 2>/dev/null | head -1)
+    
+    if [[ -z "$backup_file" ]]; then
+        # Create a backup first if none exists
+        info "Creating test backup for improved restore test..."
+        sudo -u portainer DOCKER_BACKUP_TEST=true ./backup-manager.sh backup >/dev/null 2>&1
+        backup_file=$(ls -1t /opt/backup/docker_backup_*.tar.gz 2>/dev/null | head -1)
+        backup_count_before=$((backup_count_before + 1))
+        
+        if [[ -z "$backup_file" ]]; then
+            error "Could not create test backup for improved restore test"
+            return 1
+        fi
+    fi
+    
+    info "Using backup for restore test: $(basename "$backup_file")"
+    info "Backup count before restore: $backup_count_before"
+    
+    # Create test stack using one of our test configurations
+    local test_stack_dir="/tmp/test_stack_minecraft"
+    mkdir -p "$test_stack_dir"
+    cp test-stack-minecraft.yml "$test_stack_dir/docker-compose.yml"
+    
+    # Deploy test stack
+    info "Deploying test stack to verify cleanup..."
+    cd "$test_stack_dir"
+    sudo -u portainer docker compose up -d >/dev/null 2>&1 || true
+    
+    # Wait for container to start
+    sleep 5
+    
+    # Record containers before restore
+    local containers_before
+    containers_before=$(sudo -u portainer docker ps --format "{{.Names}}" | sort)
+    info "Containers before restore: $(echo "$containers_before" | tr '\n' ' ')"
+    
+    # Perform restore (should NOT create pre-restore backup)
+    cd /home/vagrant/docker-stack-backup
+    info "Performing restore with improved process..."
+    echo "1" | sudo -u portainer DOCKER_BACKUP_TEST=true ./backup-manager.sh restore >/dev/null 2>&1
+    
+    # Wait for restore to complete
+    sleep 20
+    
+    # Check that NO pre-restore backup was created
+    local backup_count_after
+    backup_count_after=$(ls -1 /opt/backup/docker_backup_*.tar.gz 2>/dev/null | wc -l)
+    
+    info "Backup count after restore: $backup_count_after"
+    
+    if [[ $backup_count_after -eq $backup_count_before ]]; then
+        success "✅ No pre-restore backup was created (improved process working)"
+    else
+        error "❌ Pre-restore backup was created - old process still active"
+        return 1
+    fi
+    
+    # Verify test stack was completely cleaned up
+    if sudo -u portainer docker ps --format "{{.Names}}" | grep -q "minecraft"; then
+        error "❌ Test container (minecraft) still exists - cleanup failed"
+        return 1
+    else
+        success "✅ Test containers completely cleaned up during restore"
+    fi
+    
+    # Verify core services are running
+    if sudo -u portainer docker ps --format "{{.Names}}" | grep -q "portainer"; then
+        success "✅ Portainer restored and running"
+    else
+        error "❌ Portainer not running after restore"
+        return 1
+    fi
+    
+    # Clean up test stack directory
+    rm -rf "$test_stack_dir"
+    
+    success "Improved restore process test completed successfully"
+    return 0
+}
+
 # Test enhanced restore with complete container cleanup
 test_enhanced_restore_with_cleanup() {
     info "Testing enhanced restore with complete container cleanup..."
@@ -6699,6 +6790,7 @@ run_vm_tests() {
     run_test "Enhanced Backup with Portainer Shutdown" "test_enhanced_backup_with_portainer_shutdown"
     run_test "Container Restart After Backup" "test_container_restart"
     run_test "Stack Restoration After Backup" "test_stack_restoration_after_backup"
+    run_test "Improved Restore without Pre-backup" "test_improved_restore_no_prebackup"
     run_test "Enhanced Restore with Complete Cleanup" "test_enhanced_restore_with_cleanup"
     run_test "External URL Verification After Restore" "test_external_url_verification"
     run_test "Backup Listing" "test_backup_listing"
