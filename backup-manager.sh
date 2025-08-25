@@ -1097,6 +1097,7 @@ setup_fixed_configuration() {
     # Use fixed default paths - no customization
     PORTAINER_USER="portainer"
     PORTAINER_PATH="/opt/portainer"
+    NPM_PATH="$DEFAULT_NPM_PATH"
     TOOLS_PATH="/opt/tools"
     BACKUP_PATH="/opt/backup"
 
@@ -1123,11 +1124,14 @@ setup_fixed_configuration() {
         printf "%b\n" "${BLUE}Configuration summary:${NC}"
         echo "  • System user: $PORTAINER_USER (fixed)"
         echo "  • Portainer path: $PORTAINER_PATH (fixed)"
+        echo "  • NPM path: $NPM_PATH (fixed)"
         echo "  • Tools path: $TOOLS_PATH (fixed)"
         echo "  • Backup path: $BACKUP_PATH (fixed)"
         echo "  • Domain: $DOMAIN_NAME"
         echo "  • Portainer URL: https://$PORTAINER_SUBDOMAIN.$DOMAIN_NAME"
         echo "  • NPM admin URL: https://$NPM_SUBDOMAIN.$DOMAIN_NAME"
+        echo
+        printf "%b\n" "${YELLOW}📁 Important: Store your stack files in /opt/tools/name-of-the-stack${NC}"
         echo
 
         if ! prompt_yes_no "Continue with this configuration?" "y"; then
