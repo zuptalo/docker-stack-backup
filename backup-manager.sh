@@ -244,7 +244,7 @@ cleanup() {
     
     # Clean up any operation lock files
     if [[ -n "${OPERATION_LOCK:-}" && -f "$OPERATION_LOCK" ]]; then
-        rm -f "$OPERATION_LOCK" 2>/dev/null || true
+        rm -f "$OPERATION_LOCK" 2>/dev/null || sudo rm -f "$OPERATION_LOCK" 2>/dev/null || true
     fi
     
     # If we're exiting due to an error and recovery info exists, show recovery instructions
@@ -693,11 +693,25 @@ create_operation_lock() {
             return 1
         else
             warn "Removing stale lock file: $lock_file"
-            rm -f "$lock_file"
+            if ! rm -f "$lock_file" 2>/dev/null; then
+                # If rm fails due to permissions, try with sudo
+                sudo rm -f "$lock_file" 2>/dev/null || {
+                    error "Cannot remove stale lock file: $lock_file"
+                    error "Please run: sudo rm -f '$lock_file'"
+                    return 1
+                }
+            fi
         fi
     fi
     
-    echo "$$" > "$lock_file"
+    if ! echo "$$" > "$lock_file" 2>/dev/null; then
+        # If write fails due to permissions, try with sudo
+        echo "$$" | sudo tee "$lock_file" > /dev/null || {
+            error "Cannot create lock file: $lock_file"
+            error "Please check permissions or run as appropriate user"
+            return 1
+        }
+    fi
     OPERATION_LOCK="$lock_file"
     return 0
 }
@@ -4122,9 +4136,9 @@ implement_true_snapshot_restore() {
 
 # Stop and remove all containers except Portainer
 stop_and_remove_all_containers() {
-    info "Getting list of all running containers..."
+    info "Getting list of all containers (running and stopped)..."
     local all_containers
-    all_containers=$(sudo -u "$PORTAINER_USER" docker ps --format "{{.Names}}" | grep -v "^portainer$" || true)
+    all_containers=$(sudo -u "$PORTAINER_USER" docker ps -a --format "{{.Names}}" | grep -v "^portainer$" || true)
     
     if [[ -n "$all_containers" ]]; then
         info "Stopping containers: $(echo "$all_containers" | tr '\n' ' ')"
