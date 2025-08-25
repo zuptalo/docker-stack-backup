@@ -4105,6 +4105,16 @@ start_portainer_from_restored_data() {
         return 1
     fi
     
+    # Ensure required external network exists before starting Portainer
+    info "Ensuring required Docker networks exist..."
+    if ! sudo -u "$PORTAINER_USER" docker network ls | grep -q "prod-network"; then
+        info "Creating prod-network for restored services..."
+        sudo -u "$PORTAINER_USER" docker network create prod-network || true
+        success "prod-network created successfully"
+    else
+        info "prod-network already exists"
+    fi
+    
     # Start Portainer using the restored compose file
     info "Starting Portainer using restored compose configuration..."
     cd "$PORTAINER_PATH"
@@ -5466,33 +5476,30 @@ list_backups() {
 
 # Clean up system for restore - remove all containers and clean directories
 cleanup_system_for_restore() {
-    info "Stopping all running containers..."
+    info "Forcefully removing all containers for clean restore..."
     
-    # Stop all containers including Portainer (we'll restart it later)
+    # Get all containers (running and stopped) and force remove them
     local all_containers
-    all_containers=$(sudo -u "$PORTAINER_USER" docker ps -q)
-    
-    if [[ -n "$all_containers" ]]; then
-        info "Stopping containers: $all_containers"
-        sudo -u "$PORTAINER_USER" docker stop $all_containers || warn "Some containers failed to stop gracefully"
-    fi
-    
-    info "Removing all containers..."
     all_containers=$(sudo -u "$PORTAINER_USER" docker ps -aq)
     
     if [[ -n "$all_containers" ]]; then
-        info "Removing containers: $all_containers"
+        info "Force removing containers: $all_containers"
         sudo -u "$PORTAINER_USER" docker rm -f $all_containers || warn "Some containers failed to be removed"
     fi
     
-    info "Cleaning up docker volumes, networks, and system..."
+    info "Cleaning up docker volumes and system..."
     sudo -u "$PORTAINER_USER" docker volume prune -f || true
-    sudo -u "$PORTAINER_USER" docker network prune -f || true
     sudo -u "$PORTAINER_USER" docker system prune -f || true
+    
+    # Preserve prod-network since it's required for restored services
+    info "Ensuring prod-network exists for restored services..."
+    if ! sudo -u "$PORTAINER_USER" docker network ls | grep -q "prod-network"; then
+        sudo -u "$PORTAINER_USER" docker network create prod-network || true
+    fi
     
     info "Completely cleaning portainer and tools directories..."
     
-    # Remove all contents from portainer directory except the backup script expects the structure
+    # Remove all contents from portainer directory
     if [[ -d "$PORTAINER_PATH" ]]; then
         sudo rm -rf "$PORTAINER_PATH"/*
     fi
@@ -5577,20 +5584,6 @@ restore_backup() {
     fi
     
     info "Restoring from backup: $backup_name"
-    
-    # Stop containers (gracefully handle Portainer API unavailability)
-    if ! stop_containers; then
-        info "Portainer API unavailable - will start Portainer during restore process"
-        # Stop any running containers directly since API is unavailable
-        info "Stopping any running containers directly..."
-        local containers_to_stop=($(sudo -u "$PORTAINER_USER" docker ps --format "table {{.Names}}" | grep -v "^NAMES$" | grep -v "portainer" || true))
-        for container in "${containers_to_stop[@]}"; do
-            if [[ -n "$container" ]]; then
-                info "Stopping container: $container"
-                sudo -u "$PORTAINER_USER" docker stop "$container" 2>/dev/null || warn "Failed to stop $container"
-            fi
-        done
-    fi
     
     # Clean up existing containers and directories before restore
     info "Cleaning up system before restore..."
