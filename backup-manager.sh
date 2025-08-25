@@ -179,7 +179,8 @@ start_progress_monitor() {
     local estimated_time="${2:-unknown}"
     
     # Only show progress in interactive mode and not in test environment
-    if [[ "${QUIET_MODE:-false}" == "true" ]] || [[ "${NON_INTERACTIVE:-false}" == "true" ]] || is_test_environment; then
+    # Also skip if stdout is not a terminal (e.g., piped or redirected)
+    if [[ "${QUIET_MODE:-false}" == "true" ]] || [[ "${NON_INTERACTIVE:-false}" == "true" ]] || is_test_environment || [[ ! -t 1 ]]; then
         echo ""  # Return empty string instead of PID
         return 0
     fi
@@ -5092,36 +5093,77 @@ create_backup() {
     verbose "Creating backup archive at: $final_backup_file"
     verbose "Including directories: $PORTAINER_PATH and active stack dirs"
     
+    # Validate required directories exist
+    if [[ ! -d "$PORTAINER_PATH" ]]; then
+        stop_progress_monitor "$progress_pid" "Portainer directory missing"
+        error "Portainer directory not found: $PORTAINER_PATH"
+        return 1
+    fi
+    
+    # Check active stack directories
+    if [[ -n "$active_stack_dirs" ]]; then
+        for stack_dir in $active_stack_dirs; do
+            if [[ ! -d "/$stack_dir" ]]; then
+                warn "Stack directory not found: /$stack_dir (will be skipped)"
+                active_stack_dirs=$(echo "$active_stack_dirs" | sed "s|$stack_dir||g" | tr -s ' ')
+            fi
+        done
+    fi
+    
+    verbose "Final directories to backup: $(echo $PORTAINER_PATH | sed 's|^/||') $active_stack_dirs"
+    
     if [[ -f "$temp_backup_dir/stack_states.json" ]] || [[ -f "$temp_backup_dir/backup_metadata.json" ]]; then
         verbose "Using multi-stage archive creation (tar + additional files + compression)"
         # Create uncompressed tar first, add additional files, then compress
-        sudo tar --same-owner --same-permissions -cf "${final_backup_file%.gz}" \
+        verbose "Creating base archive with directories: $(echo $PORTAINER_PATH | sed 's|^/||') $active_stack_dirs"
+        if ! timeout 300 sudo tar --same-owner --same-permissions -cf "${final_backup_file%.gz}" \
             "$(echo $PORTAINER_PATH | sed 's|^/||')" \
-            $active_stack_dirs
+            $active_stack_dirs 2>/dev/null; then
+            stop_progress_monitor "$progress_pid" "Backup archive creation failed"
+            error "Failed to create base backup archive - tar command failed or timed out"
+            return 1
+        fi
         
         verbose "Base archive created, adding additional files..."
         # Add stack states if available
         if [[ -f "$temp_backup_dir/stack_states.json" ]]; then
             verbose "Adding stack states configuration..."
-            sudo tar --same-owner --same-permissions -rf "${final_backup_file%.gz}" \
-                -C "$temp_backup_dir" stack_states.json
+            if ! timeout 60 sudo tar --same-owner --same-permissions -rf "${final_backup_file%.gz}" \
+                -C "$temp_backup_dir" stack_states.json 2>/dev/null; then
+                stop_progress_monitor "$progress_pid" "Failed to add stack states"
+                error "Failed to add stack states to backup archive"
+                return 1
+            fi
         fi
         
         # Add metadata file if available
         if [[ -f "$temp_backup_dir/backup_metadata.json" ]]; then
             verbose "Adding backup metadata..."
-            sudo tar --same-owner --same-permissions -rf "${final_backup_file%.gz}" \
-                -C "$temp_backup_dir" backup_metadata.json
+            if ! timeout 60 sudo tar --same-owner --same-permissions -rf "${final_backup_file%.gz}" \
+                -C "$temp_backup_dir" backup_metadata.json 2>/dev/null; then
+                stop_progress_monitor "$progress_pid" "Failed to add metadata"
+                error "Failed to add metadata to backup archive"
+                return 1
+            fi
         fi
         
         verbose "Compressing final archive..."
-        sudo gzip "${final_backup_file%.gz}"
+        if ! timeout 120 sudo gzip "${final_backup_file%.gz}" 2>/dev/null; then
+            stop_progress_monitor "$progress_pid" "Compression failed"
+            error "Failed to compress backup archive"
+            return 1
+        fi
     else
         verbose "Using single-stage compressed archive creation"
         # Create compressed tar directly if no additional files
-        sudo tar --same-owner --same-permissions -czf "$final_backup_file" \
+        verbose "Creating compressed archive with directories: $(echo $PORTAINER_PATH | sed 's|^/||') $active_stack_dirs"
+        if ! timeout 300 sudo tar --same-owner --same-permissions -czf "$final_backup_file" \
             "$(echo $PORTAINER_PATH | sed 's|^/||')" \
-            $active_stack_dirs
+            $active_stack_dirs 2>/dev/null; then
+            stop_progress_monitor "$progress_pid" "Single-stage backup creation failed"
+            error "Failed to create compressed backup archive - tar command failed or timed out"
+            return 1
+        fi
     fi
     
     # Stop progress monitor
