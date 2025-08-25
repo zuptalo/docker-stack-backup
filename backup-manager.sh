@@ -4669,84 +4669,96 @@ deploy_stack_from_backup() {
     local stack_state_file="$2" 
     local jwt_token="$3"
     
-    # Extract stack configuration from backup
-    local stack_config
-    stack_config=$(jq -r ".stacks[] | select(.name == \"$stack_name\")" "$stack_state_file" 2>/dev/null)
-    
-    if [[ -z "$stack_config" || "$stack_config" == "null" ]]; then
-        warn "Stack configuration not found for: $stack_name"
-        return 1
-    fi
-    
-    # Extract the compose file content (it's double-encoded JSON)
-    local compose_content
-    local compose_wrapper
-    compose_wrapper=$(echo "$stack_config" | jq -r '.compose_file_content // empty' 2>/dev/null)
-    
-    if [[ -z "$compose_wrapper" || "$compose_wrapper" == "null" ]]; then
-        warn "No compose content found for stack: $stack_name"
-        return 1
-    fi
-    
-    # Extract the actual compose content from the wrapper
-    compose_content=$(echo "$compose_wrapper" | jq -r '.StackFileContent // empty' 2>/dev/null)
-    
-    if [[ -z "$compose_content" || "$compose_content" == "null" ]]; then
-        warn "Failed to extract compose file content for stack: $stack_name"
-        return 1
-    fi
-    
-    # Extract environment variables
-    local env_vars
-    env_vars=$(echo "$stack_config" | jq -c '.env // []' 2>/dev/null)
-    
-    # Create the stack using Portainer API with correct endpoint
-    info "Creating stack: $stack_name via Portainer API"
-    local create_response
-    create_response=$(curl -s -X POST "$PORTAINER_API_URL/stacks/create/standalone/string?endpointId=1" \
-        -H "Authorization: Bearer $jwt_token" \
-        -H "Content-Type: application/json" \
-        -d "{
-            \"method\": \"string\",
-            \"type\": \"standalone\",
-            \"Name\": \"$stack_name\",
-            \"StackFileContent\": $(echo "$compose_content" | jq -Rs .),
-            \"Env\": $env_vars
-        }")
-    
-    # Check if stack creation was successful
-    local stack_id
-    stack_id=$(echo "$create_response" | jq -r '.Id // empty' 2>/dev/null)
-    
-    if [[ -n "$stack_id" && "$stack_id" != "null" ]]; then
-        success "Stack '$stack_name' deployed successfully (ID: $stack_id)"
-        return 0
-    else
-        # Check if stack already exists (common when restoring from backup)
-        if echo "$create_response" | jq -e '.message' | grep -q "already exists"; then
-            info "Stack '$stack_name' already exists, attempting to start it..."
-            
-            # Get existing stack ID
-            local existing_stacks
-            existing_stacks=$(curl -s -X GET "$PORTAINER_API_URL/stacks" -H "Authorization: Bearer $jwt_token")
-            local existing_stack_id
-            existing_stack_id=$(echo "$existing_stacks" | jq -r ".[] | select(.Name == \"$stack_name\") | .Id")
-            
-            if [[ -n "$existing_stack_id" && "$existing_stack_id" != "null" ]]; then
-                # Start the existing stack
-                info "Starting existing stack '$stack_name' (ID: $existing_stack_id)"
-                local start_response
-                start_response=$(curl -s -X POST "$PORTAINER_API_URL/stacks/$existing_stack_id/start" \
-                    -H "Authorization: Bearer $jwt_token")
+    # For nginx-proxy-manager, use the compose file directly from restored location
+    if [[ "$stack_name" == "nginx-proxy-manager" ]]; then
+        local compose_file="$NPM_PATH/docker-compose.yml"
+        if [[ ! -f "$compose_file" ]]; then
+            warn "nginx-proxy-manager compose file not found at: $compose_file"
+            return 1
+        fi
+        
+        info "Deploying nginx-proxy-manager from restored compose file"
+        local npm_compose_content
+        npm_compose_content=$(cat "$compose_file")
+        
+        # Use the proven working method from setup
+        local create_response
+        create_response=$(curl -s -X POST "$PORTAINER_API_URL/stacks/create/standalone/string?endpointId=1" \
+            -H "Authorization: Bearer $jwt_token" \
+            -H "Content-Type: application/json" \
+            -d "{
+                \"method\": \"string\",
+                \"type\": \"standalone\",
+                \"Name\": \"nginx-proxy-manager\",
+                \"StackFileContent\": $(echo "$npm_compose_content" | jq -Rs .),
+                \"Env\": []
+            }")
+        
+        local stack_id
+        stack_id=$(echo "$create_response" | jq -r '.Id // empty')
+        
+        if [[ -n "$stack_id" && "$stack_id" != "null" ]]; then
+            success "Stack '$stack_name' deployed successfully (ID: $stack_id)"
+            return 0
+        else
+            # Check if stack already exists and start it
+            if echo "$create_response" | jq -e '.message' 2>/dev/null | grep -q "already exists"; then
+                info "Stack '$stack_name' already exists, attempting to start it..."
                 
-                success "Stack '$stack_name' started successfully (ID: $existing_stack_id)"
-                return 0
+                # Get existing stack ID
+                local existing_stacks
+                existing_stacks=$(curl -s -X GET "$PORTAINER_API_URL/stacks" -H "Authorization: Bearer $jwt_token")
+                local existing_stack_id
+                existing_stack_id=$(echo "$existing_stacks" | jq -r ".[] | select(.Name == \"$stack_name\") | .Id")
+                
+                if [[ -n "$existing_stack_id" && "$existing_stack_id" != "null" ]]; then
+                    # Start the existing stack
+                    info "Starting existing stack '$stack_name' (ID: $existing_stack_id)"
+                    curl -s -X POST "$PORTAINER_API_URL/stacks/$existing_stack_id/start" \
+                        -H "Authorization: Bearer $jwt_token" >/dev/null
+                    
+                    success "Stack '$stack_name' started successfully (ID: $existing_stack_id)"
+                    return 0
+                else
+                    warn "Could not find existing stack '$stack_name' to start"
+                    return 1
+                fi
             else
-                warn "Could not find existing stack '$stack_name' to start"
+                warn "Failed to deploy stack '$stack_name'. API response: $create_response"
                 return 1
             fi
+        fi
+    else
+        # For other stacks, use compose files from tools directory
+        local compose_file="$TOOLS_PATH/$stack_name/docker-compose.yml"
+        if [[ ! -f "$compose_file" ]]; then
+            warn "Compose file not found for stack '$stack_name' at: $compose_file"
+            return 1
+        fi
+        
+        info "Deploying stack '$stack_name' from restored compose file"
+        local compose_content
+        compose_content=$(cat "$compose_file")
+        
+        local create_response
+        create_response=$(curl -s -X POST "$PORTAINER_API_URL/stacks/create/standalone/string?endpointId=1" \
+            -H "Authorization: Bearer $jwt_token" \
+            -H "Content-Type: application/json" \
+            -d "{
+                \"method\": \"string\",
+                \"type\": \"standalone\",
+                \"Name\": \"$stack_name\",
+                \"StackFileContent\": $(echo "$compose_content" | jq -Rs .),
+                \"Env\": []
+            }")
+        
+        local stack_id
+        stack_id=$(echo "$create_response" | jq -r '.Id // empty')
+        
+        if [[ -n "$stack_id" && "$stack_id" != "null" ]]; then
+            success "Stack '$stack_name' deployed successfully (ID: $stack_id)"
+            return 0
         else
-            # Log the error response for debugging
             warn "Failed to deploy stack '$stack_name'. API response: $create_response"
             return 1
         fi
