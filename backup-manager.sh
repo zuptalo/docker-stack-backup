@@ -2424,7 +2424,7 @@ EOF
 configure_nginx_proxy_manager() {
     info "Configuring nginx-proxy-manager..."
     
-    local npm_path="$TOOLS_PATH/nginx-proxy-manager"
+    local npm_path="$NPM_PATH"
     
     # Load custom credentials from setup
     if [[ -f "$npm_path/.credentials" ]]; then
