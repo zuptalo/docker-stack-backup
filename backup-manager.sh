@@ -861,6 +861,11 @@ install_system_packages() {
 
 # Check if running as root
 check_root() {
+    # Skip root check in test environment
+    if [[ "${DOCKER_BACKUP_TEST:-}" == "true" ]]; then
+        return 0
+    fi
+    
     if [[ $EUID -eq 0 ]]; then
         die "This script should not be run as root for security reasons. Run as a regular user with sudo privileges."
     fi
@@ -2765,6 +2770,9 @@ PORTAINER_URL=https://${PORTAINER_URL}
 PORTAINER_API_URL=http://localhost:9000/api
 EOF
 
+    # Ensure data directory exists for validation
+    sudo -u "$PORTAINER_USER" mkdir -p "$PORTAINER_PATH/data"
+    
     # Deploy Portainer
     cd "$PORTAINER_PATH"
     sudo -u "$PORTAINER_USER" docker compose up -d
