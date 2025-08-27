@@ -3798,7 +3798,7 @@ restore_legacy_stacks() {
             
             if [[ -n "$stack_id" && "$stack_id" != "null" ]]; then
                 local start_response
-                start_response=$(curl -s -X POST "$PORTAINER_API_URL/stacks/$stack_id/start" \
+                start_response=$(curl -s -X POST "$PORTAINER_API_URL/stacks/$stack_id/start?endpointId=1" \
                     -H "Authorization: Bearer $jwt_token")
                 
                 if echo "$start_response" | grep -q "error\|Error" 2>/dev/null; then
@@ -4714,7 +4714,7 @@ deploy_stack_from_backup() {
                 if [[ -n "$existing_stack_id" && "$existing_stack_id" != "null" ]]; then
                     # Start the existing stack
                     info "Starting existing stack '$stack_name' (ID: $existing_stack_id)"
-                    curl -s -X POST "$PORTAINER_API_URL/stacks/$existing_stack_id/start" \
+                    curl -s -X POST "$PORTAINER_API_URL/stacks/$existing_stack_id/start?endpointId=1" \
                         -H "Authorization: Bearer $jwt_token" >/dev/null
                     
                     success "Stack '$stack_name' started successfully (ID: $existing_stack_id)"
