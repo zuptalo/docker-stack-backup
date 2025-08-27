@@ -5730,9 +5730,10 @@ restore_backup() {
 validate_cron_expression() {
     local cron_expr="$1"
     
-    # Remove extra whitespace and split into fields
+    # Remove extra whitespace and split into fields (avoid globbing)
     cron_expr=$(echo "$cron_expr" | tr -s ' ')
-    local fields=($cron_expr)
+    local fields
+    read -ra fields <<< "$cron_expr"
     
     # Check if we have exactly 5 fields
     if [[ ${#fields[@]} -ne 5 ]]; then
