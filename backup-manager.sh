@@ -547,7 +547,7 @@ validate_services_post_restore() {
     # Verify containers are running
     local expected_containers=("portainer")
     for container in "${expected_containers[@]}"; do
-        if ! docker ps --format "table {{.Names}}" | grep -q "^${container}$"; then
+        if ! sudo -u "${PORTAINER_USER:-portainer}" docker ps --format "table {{.Names}}" | grep -q "^${container}$"; then
             errors+=("Expected container not running after restore: $container")
         fi
     done
@@ -620,7 +620,7 @@ validate_stack_states() {
         else
             # If API response is invalid, check basic stack existence another way
             info "API response invalid, checking basic container status instead"
-            if docker ps --format "table {{.Names}}" | grep -E "nginx-proxy-manager|dashboard" >/dev/null 2>&1; then
+            if sudo -u "${PORTAINER_USER:-portainer}" docker ps --format "table {{.Names}}" | grep -E "nginx-proxy-manager|dashboard" >/dev/null 2>&1; then
                 info "Core service containers are running (basic check)"
             else
                 errors+=("No core service containers found running after restore")
@@ -629,7 +629,7 @@ validate_stack_states() {
     else
         # If authentication fails, do a basic container check instead of failing validation
         info "Portainer authentication failed, performing basic container validation"
-        if docker ps --format "table {{.Names}}" | grep -q "portainer"; then
+        if sudo -u "${PORTAINER_USER:-portainer}" docker ps --format "table {{.Names}}" | grep -q "portainer"; then
             info "Portainer container is running (basic check)"
             # Don't fail validation just because API auth failed - containers might still be working
         else
@@ -673,7 +673,7 @@ validate_service_accessibility() {
     fi
     
     # Check nginx-proxy-manager if it exists
-    if docker ps --format "table {{.Names}}" | grep -q "nginx-proxy-manager"; then
+    if sudo -u "${PORTAINER_USER:-portainer}" docker ps --format "table {{.Names}}" | grep -q "nginx-proxy-manager"; then
         if ! curl -s --max-time 10 "http://localhost:81" >/dev/null 2>&1; then
             errors+=("nginx-proxy-manager not accessible after configuration")
         fi
