@@ -6775,7 +6775,7 @@ uninstall_system() {
     printf "%b\n" "${YELLOW}This command will completely remove:${NC}"
     echo "  • All Docker containers (Portainer, nginx-proxy-manager, user stacks)"
     echo "  • All Docker volumes, networks, and dangling images"
-    echo "  • All configuration files in /opt/portainer and /opt/tools"
+    echo "  • All configuration files in /opt/portainer, /opt/nginx-proxy-manager, and /opt/tools"
     echo "  • All backup data in /opt/backup (unless you choose to keep it)"
     echo "  • The 'portainer' system user and its home directory"
     echo "  • All cron jobs and scheduled backups"
@@ -6844,6 +6844,12 @@ uninstall_system() {
         sudo rm -rf /opt/portainer && success "Removed /opt/portainer"
     else
         info "/opt/portainer directory not found"
+    fi
+    
+    if [[ -d "/opt/nginx-proxy-manager" ]]; then
+        sudo rm -rf /opt/nginx-proxy-manager && success "Removed /opt/nginx-proxy-manager"
+    else
+        info "/opt/nginx-proxy-manager directory not found"
     fi
     
     if [[ -d "/opt/tools" ]]; then
