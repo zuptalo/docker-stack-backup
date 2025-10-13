@@ -2,24 +2,36 @@
 
 ## Build/Test Commands
 
-```bash
-# Full test suite (creates fresh VMs, runs all 62+ tests)
-./dev-test.sh fresh
+- Full test suite (creates fresh VMs, runs all 62+ tests)
+  ```shell
+  ./dev-test.sh fresh
+  ```
+- Fast test suite (uses existing VMs)
+  ```shell
+  ./dev-test.sh run
+  ```
+- Start VMs for manual testing
+  ```shell
+  ./dev-test.sh up
+  ```
+- Run a single test function (manual execution in VM)
+  ```shell
+  vagrant ssh primary -c "cd /home/vagrant/docker-stack-backup && export DOCKER_BACKUP_TEST=true && source backup-manager.sh && test_backup_creation"
+  ```
 
-# Fast test suite (uses existing VMs)
-./dev-test.sh run
-
-# Start VMs for manual testing
-./dev-test.sh up
-
-# Run single test function (manual execution in VM)
-vagrant ssh primary -c "cd /home/vagrant/docker-stack-backup && export DOCKER_BACKUP_TEST=true && source backup-manager.sh && test_backup_creation"
-
-# VM management
-./dev-test.sh down      # Suspend VMs
-./dev-test.sh destroy   # Destroy VMs completely
-./dev-test.sh shell     # Interactive VM access menu
-```
+## VM management
+- Suspend VMs
+  ```shell
+  ./dev-test.sh down
+  ```
+- Destroy VMs completely
+  ```shell
+  ./dev-test.sh destroy
+  ```
+- Interactive VM access menu
+  ```shell
+  ./dev-test.sh shell
+  ```
 
 ## Code Style Guidelines
 
