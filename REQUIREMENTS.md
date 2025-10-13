@@ -36,7 +36,7 @@ Shows help with available commands and usage examples.
 3. **Configuration Collection**:
    - Domain name for services
    - Subdomains for Portainer and NPM
-   - Data paths (`/opt/portainer`, `/opt/tools`, `/opt/backup`)
+   - Data paths (`/opt/portainer`, `/opt/nginx-proxy-manager`, `/opt/tools`, `/opt/backup`)
    - Backup retention settings
    - Public IP detection and DNS record instructions
 
@@ -54,7 +54,7 @@ Shows help with available commands and usage examples.
 6. **NPM Integration**:
    - Deploy nginx-proxy-manager as Portainer stack
    - Configure via API (default→custom credentials)
-   - Store credentials in `/opt/tools/nginx-proxy-manager/.credentials`
+   - Store credentials in `/opt/nginx-proxy-manager/.credentials`
    - Create proxy hosts for both services
    - Request SSL certificates if DNS ready
 
@@ -171,12 +171,16 @@ Shows help with available commands and usage examples.
 ├── docker-compose.yml       # Service definition
 └── .credentials            # API credentials
 
+/opt/nginx-proxy-manager/
+├── data/               # NPM application data
+├── letsencrypt/        # SSL certificates
+├── docker-compose.yml  # Service definition
+└── .credentials        # API credentials
+
 /opt/tools/                  # Additional services
-├── nginx-proxy-manager/
-│   ├── data/               # NPM application data
-│   ├── letsencrypt/        # SSL certificates
-│   ├── docker-compose.yml  # Service definition
-│   └── .credentials        # API credentials
+├── dashboard/
+├── grafana/
+├── postgres/
 └── [other-services]/
 
 /opt/backup/                 # System-wide backup storage
@@ -202,6 +206,7 @@ Shows help with available commands and usage examples.
 
 ### Testing Strategy
 - **Vagrant Environment**: Full Ubuntu 24.04 VMs for realistic testing
+- **Development Environment**: Since the coding could happen on a macOS or Windows as well, all the test runs and code executions should happen inside the vagrant vm created from the Vagrantfile
 - **Comprehensive Test Suite**: 22 tests covering all functionality
 - **Integration Testing**: Real Docker deployment, API calls, SSH connectivity
 - **Cross-Architecture Testing**: Ensure compatibility across platforms
