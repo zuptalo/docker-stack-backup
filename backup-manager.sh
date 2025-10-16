@@ -17,7 +17,7 @@ DEFAULT_TOOLS_PATH="/opt/tools"
 DEFAULT_BACKUP_PATH="/opt/backup"
 DEFAULT_BACKUP_RETENTION=7
 DEFAULT_REMOTE_RETENTION=30
-DEFAULT_DOMAIN="zuptalo.com"
+DEFAULT_DOMAIN="zuptalo.local"
 DEFAULT_PORTAINER_SUBDOMAIN="pt"
 DEFAULT_NPM_SUBDOMAIN="npm"
 DEFAULT_PORTAINER_USER="portainer"
@@ -277,14 +277,11 @@ create_recovery_info() {
         "setup")
             current_state="initial_setup"
             ;;
-        "migration")
-            current_state="path_migration"
-            ;;
         *)
             current_state="unknown_operation"
             ;;
     esac
-    
+
     jq -n \
         --arg op "$operation" \
         --arg state "$current_state" \
@@ -301,7 +298,6 @@ create_recovery_info() {
                 backup_creation: "If backup creation failed, check disk space and try again. Previous backups are preserved.",
                 system_restore: "If restore failed, system may be in inconsistent state. Check logs and restore from last known good backup.",
                 initial_setup: "If setup failed, run uninstall command and restart setup. Check prerequisites and network connectivity.",
-                path_migration: "If migration failed, restore from pre-migration backup using restore command with the backup file listed above.",
                 unknown_operation: "Check logs for specific error messages and recovery steps."
             }
         }' > "$recovery_file" 2>/dev/null || true
@@ -865,9 +861,17 @@ check_root() {
     if [[ "${DOCKER_BACKUP_TEST:-}" == "true" ]]; then
         return 0
     fi
-    
-    if [[ $EUID -eq 0 ]]; then
+
+    # Check if running as actual root user (not via sudo)
+    local real_user="${SUDO_USER:-${USER:-$(whoami)}}"
+    if [[ "$real_user" == "root" ]]; then
         die "This script should not be run as root for security reasons. Run as a regular user with sudo privileges."
+    fi
+
+    # If EUID is 0 but SUDO_USER is set, we're running with sudo (which is fine)
+    # If EUID is 0 and no SUDO_USER, we're actually logged in as root (not allowed)
+    if [[ $EUID -eq 0 ]] && [[ -z "${SUDO_USER:-}" ]]; then
+        die "This script should not be run directly as root. Run as a regular user with sudo privileges."
     fi
 }
 
@@ -931,7 +935,17 @@ prompt_user() {
     local default_value="${2:-}"
     local timeout_default="${3:-${default_value}}"
     local variable_name=""
-    
+
+    # Handle auto-yes mode (use defaults without prompting)
+    if [[ "$AUTO_YES" == "true" ]]; then
+        if [[ -n "$default_value" ]]; then
+            printf "%s" "$default_value"
+        else
+            printf "%s" "$timeout_default"
+        fi
+        return 0
+    fi
+
     # Handle non-interactive modes
     if [[ "$NON_INTERACTIVE" == "true" ]] || is_test_environment; then
         if [[ -n "$default_value" ]]; then
@@ -1023,7 +1037,7 @@ prompt_yes_no() {
 load_config() {
     # Determine which config file to use
     local config_to_load=""
-    
+
     if [[ "$USER_SPECIFIED_CONFIG_FILE" == "true" && -n "$CONFIG_FILE" ]]; then
         # User explicitly specified a config file
         config_to_load="$CONFIG_FILE"
@@ -1031,7 +1045,7 @@ load_config() {
         # Use default config file if it exists
         config_to_load="$DEFAULT_CONFIG_FILE"
     fi
-    
+
     if [[ -n "$config_to_load" ]]; then
         info "Loading configuration from: $config_to_load"
 
@@ -1043,6 +1057,10 @@ load_config() {
 
         # shellcheck source=/dev/null
         source "$config_to_load"
+
+        # Set CONFIG_FILE to the actual file we loaded
+        CONFIG_FILE="$config_to_load"
+
         info "Configuration loaded successfully"
     fi
     
@@ -1296,524 +1314,6 @@ confirm_configuration() {
     save_config
 }
 
-# Path migration for existing installations
-migrate_paths() {
-    printf "%b\n" "${BLUE}=== Path Migration Mode ===${NC}"
-    printf "%b\n" "${YELLOW}WARNING: This will migrate your existing installation to new paths${NC}"
-    echo
-    
-    # Store current paths
-    local old_portainer_path="$PORTAINER_PATH"
-    local old_tools_path="$TOOLS_PATH"
-    local old_backup_path="$BACKUP_PATH"
-    
-    # Show current configuration
-    printf "%b\n" "${BLUE}Current Configuration:${NC}"
-    echo "Portainer Path: $PORTAINER_PATH"
-    echo "Tools Path: $TOOLS_PATH"
-    echo "Backup Path: $BACKUP_PATH"
-    echo "Domain: $DOMAIN_NAME"
-    echo "Portainer URL: https://$PORTAINER_SUBDOMAIN.$DOMAIN_NAME"
-    echo "NPM URL: https://$NPM_SUBDOMAIN.$DOMAIN_NAME"
-    echo "Local Retention: $BACKUP_RETENTION days"
-    echo "Remote Retention: $REMOTE_RETENTION days"
-    echo "System User: $PORTAINER_USER"
-    echo
-    
-    # Get new paths
-    printf "%b\n" "${BLUE}Enter new paths (press Enter to keep current):${NC}"
-    echo
-    
-    read -p "New Portainer data path [$PORTAINER_PATH]: " input
-    local new_portainer_path="${input:-$PORTAINER_PATH}"
-    
-    read -p "New Tools data path [$TOOLS_PATH]: " input
-    local new_tools_path="${input:-$TOOLS_PATH}"
-    
-    read -p "New Backup storage path [$BACKUP_PATH]: " input
-    local new_backup_path="${input:-$BACKUP_PATH}"
-    
-    read -p "Domain name [$DOMAIN_NAME]: " input
-    DOMAIN_NAME="${input:-$DOMAIN_NAME}"
-    
-    read -p "Portainer subdomain [$PORTAINER_SUBDOMAIN]: " input
-    PORTAINER_SUBDOMAIN="${input:-$PORTAINER_SUBDOMAIN}"
-    
-    read -p "NPM admin subdomain [$NPM_SUBDOMAIN]: " input
-    NPM_SUBDOMAIN="${input:-$NPM_SUBDOMAIN}"
-    
-    read -p "Local backup retention (days) [$BACKUP_RETENTION]: " input
-    BACKUP_RETENTION="${input:-$BACKUP_RETENTION}"
-    
-    read -p "Remote backup retention (days) [$REMOTE_RETENTION]: " input
-    REMOTE_RETENTION="${input:-$REMOTE_RETENTION}"
-    
-    read -p "Portainer system user [$PORTAINER_USER]: " input
-    PORTAINER_USER="${input:-$PORTAINER_USER}"
-    
-    PORTAINER_URL="${PORTAINER_SUBDOMAIN}.${DOMAIN_NAME}"
-    NPM_URL="${NPM_SUBDOMAIN}.${DOMAIN_NAME}"
-    
-    # Check if any paths need migration
-    if [[ "$new_portainer_path" == "$old_portainer_path" && 
-          "$new_tools_path" == "$old_tools_path" && 
-          "$new_backup_path" == "$old_backup_path" ]]; then
-        info "No path changes detected. Updating configuration only."
-        
-        # Update paths in memory
-        PORTAINER_PATH="$new_portainer_path"
-        TOOLS_PATH="$new_tools_path"
-        BACKUP_PATH="$new_backup_path"
-        
-        save_config
-        success "Configuration updated successfully"
-        return 0
-    fi
-    
-    echo
-    printf "%b\n" "${BLUE}Migration Summary:${NC}"
-    printf "%b\n" "${YELLOW}Paths to migrate:${NC}"
-    [[ "$new_portainer_path" != "$old_portainer_path" ]] && echo "  Portainer: $old_portainer_path → $new_portainer_path"
-    [[ "$new_tools_path" != "$old_tools_path" ]] && echo "  Tools: $old_tools_path → $new_tools_path"
-    [[ "$new_backup_path" != "$old_backup_path" ]] && echo "  Backup: $old_backup_path → $new_backup_path"
-    echo
-    printf "%b\n" "${YELLOW}Migration Process:${NC}"
-    echo "1. Inventory deployed stacks via Portainer API"
-    echo "2. Create pre-migration backup"
-    echo "3. Stop services gracefully"
-    echo "4. Move data folders to new paths"
-    echo "5. Update configurations"
-    echo "6. Restart services and validate"
-    echo
-    
-    if ! prompt_yes_no "Proceed with migration?" "n"; then
-        echo "Migration cancelled"
-        return 1
-    fi
-    
-    # Perform the migration
-    perform_path_migration "$old_portainer_path" "$new_portainer_path" "$old_tools_path" "$new_tools_path" "$old_backup_path" "$new_backup_path"
-}
-
-# Perform the actual path migration
-perform_path_migration() {
-    local old_portainer_path="$1"
-    local new_portainer_path="$2"
-    local old_tools_path="$3"
-    local new_tools_path="$4"
-    local old_backup_path="$5"
-    local new_backup_path="$6"
-    
-    local migration_log="/tmp/migration_$(date +%Y%m%d_%H%M%S).log"
-    local rollback_info="/tmp/rollback_$(date +%Y%m%d_%H%M%S).json"
-    
-    exec 3>&1 4>&2
-    exec 1> >(tee -a "$migration_log")
-    exec 2> >(tee -a "$migration_log" >&2)
-    
-    echo "=== MIGRATION STARTED: $(date) ===" 
-    
-    # Step 1: Inventory deployed stacks
-    info "Step 1: Inventorying deployed stacks..."
-    local stack_inventory="/tmp/stack_inventory_$(date +%Y%m%d_%H%M%S).json"
-    get_stack_inventory "$stack_inventory"
-    
-    local stack_count=$(jq -r '.stacks | length' "$stack_inventory" 2>/dev/null || echo "0")
-    info "Found $stack_count deployed stacks"
-    
-    # Warn about complexity if additional stacks exist
-    if [[ "$stack_count" -gt 2 ]]; then
-        warn "Found $stack_count stacks (more than basic Portainer + NPM setup)"
-        warn "This migration will be more complex and may require manual intervention"
-        echo
-        jq -r '.stacks[] | "  - \(.name) (ID: \(.id))"' "$stack_inventory" 2>/dev/null || echo "  - Unable to list stacks"
-        echo
-        if ! prompt_yes_no "Continue with complex migration?" "n"; then
-            error "Migration cancelled due to complexity"
-            return 1
-        fi
-    fi
-    
-    # Step 2: Create pre-migration backup
-    info "Step 2: Creating pre-migration backup..."
-    local backup_timestamp=$(date '+%Y%m%d_%H%M%S')
-    local pre_migration_backup="$old_backup_path/pre_migration_backup_${backup_timestamp}.tar.gz"
-    
-    create_migration_backup "$pre_migration_backup" "$stack_inventory"
-    
-    # Create rollback information
-    jq -n \
-        --arg old_portainer "$old_portainer_path" \
-        --arg new_portainer "$new_portainer_path" \
-        --arg old_tools "$old_tools_path" \
-        --arg new_tools "$new_tools_path" \
-        --arg old_backup "$old_backup_path" \
-        --arg new_backup "$new_backup_path" \
-        --arg backup_file "$pre_migration_backup" \
-        --arg stack_file "$stack_inventory" \
-        --arg log_file "$migration_log" \
-        '{
-            old_paths: {
-                portainer: $old_portainer,
-                tools: $old_tools,
-                backup: $old_backup
-            },
-            new_paths: {
-                portainer: $new_portainer,
-                tools: $new_tools,
-                backup: $new_backup
-            },
-            backup_file: $backup_file,
-            stack_inventory: $stack_file,
-            log_file: $log_file,
-            migration_date: now
-        }' > "$rollback_info"
-    
-    # Step 3: Stop services gracefully
-    info "Step 3: Stopping services gracefully..."
-    stop_containers_for_migration
-    
-    # Step 4: Move data folders
-    info "Step 4: Moving data folders to new paths..."
-    migrate_data_folders "$old_portainer_path" "$new_portainer_path" "$old_tools_path" "$new_tools_path" "$old_backup_path" "$new_backup_path"
-    
-    # Step 5: Update configurations
-    info "Step 5: Updating configurations..."
-    update_configurations_for_migration "$old_portainer_path" "$new_portainer_path" "$old_tools_path" "$new_tools_path" "$old_backup_path" "$new_backup_path"
-    
-    # Step 6: Restart services and validate
-    info "Step 6: Restarting services and validating..."
-    restart_and_validate_services "$stack_inventory"
-    
-    exec 1>&3 2>&4
-    exec 3>&- 4>&-
-    
-    success "Migration completed successfully!"
-    success "Rollback information saved to: $rollback_info"
-    success "Migration log saved to: $migration_log"
-    
-    info "Services should be accessible at:"
-    info "  Portainer: https://$PORTAINER_URL"
-    info "  nginx-proxy-manager: https://$NPM_URL"
-}
-
-# Get detailed stack inventory for migration
-get_stack_inventory() {
-    local output_file="$1"
-    
-    if [[ ! -f "$PORTAINER_PATH/.credentials" ]]; then
-        warn "Portainer credentials not found"
-        echo '{"stacks": []}' > "$output_file"
-        return 0
-    fi
-    
-    source "$PORTAINER_PATH/.credentials"
-    
-    # Login to Portainer API
-    local auth_response
-    auth_response=$(curl -s -X POST "$PORTAINER_API_URL/auth" \
-        -H "Content-Type: application/json" \
-        -d "{\"Username\": \"$PORTAINER_ADMIN_USERNAME\", \"Password\": \"$PORTAINER_ADMIN_PASSWORD\"}")
-    
-    local jwt_token
-    jwt_token=$(echo "$auth_response" | jq -r '.jwt // empty')
-    
-    if [[ -z "$jwt_token" ]]; then
-        warn "Failed to authenticate with Portainer API for stack inventory"
-        echo '{"stacks": []}' > "$output_file"
-        return 0
-    fi
-    
-    # Get detailed stack information
-    local stacks_response
-    stacks_response=$(curl -s -H "Authorization: Bearer $jwt_token" "$PORTAINER_API_URL/stacks")
-    
-    # Create detailed inventory
-    local stack_inventory='{"stacks": []}'
-    if [[ "$stacks_response" != "null" && -n "$stacks_response" ]]; then
-        stack_inventory=$(echo "$stacks_response" | jq '{
-            stacks: [.[] | {
-                id: .Id,
-                name: .Name,
-                status: .Status,
-                type: .Type,
-                endpoint_id: .EndpointId,
-                compose_file: .ComposeFile,
-                env_vars: .Env,
-                creation_date: .CreationDate,
-                update_date: .UpdateDate
-            }]
-        }')
-    fi
-    
-    echo "$stack_inventory" > "$output_file"
-    info "Stack inventory saved to: $output_file"
-}
-
-# Create a comprehensive backup before migration
-create_migration_backup() {
-    local backup_file="$1"
-    local stack_inventory="$2"
-    
-    info "Creating comprehensive pre-migration backup..."
-    
-    local temp_backup_dir="/tmp/pre_migration_backup_$(date +%Y%m%d_%H%M%S)"
-    mkdir -p "$temp_backup_dir"
-    
-    # Copy stack inventory
-    cp "$stack_inventory" "$temp_backup_dir/stack_inventory.json"
-    
-    # Copy current configuration
-    cp "$CONFIG_FILE" "$temp_backup_dir/config.conf"
-    
-    # Create metadata
-    jq -n \
-        --arg version "$VERSION" \
-        --arg backup_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-        --arg backup_type "pre_migration" \
-        --arg portainer_path "$PORTAINER_PATH" \
-        --arg tools_path "$TOOLS_PATH" \
-        --arg backup_path "$BACKUP_PATH" \
-        '{
-            version: $version,
-            backup_date: $backup_date,
-            backup_type: $backup_type,
-            paths: {
-                portainer: $portainer_path,
-                tools: $tools_path,
-                backup: $backup_path
-            }
-        }' > "$temp_backup_dir/backup_metadata.json"
-    
-    # Create the backup archive
-    info "Creating backup archive at: $backup_file"
-    
-    # Ensure parent directory exists
-    mkdir -p "$(dirname "$backup_file")"
-    
-    # Create tar archive with preserved permissions
-    if sudo tar -czf "$backup_file" \
-        --same-owner --same-permissions \
-        -C "$PORTAINER_PATH" . \
-        -C "$TOOLS_PATH" . \
-        -C "$temp_backup_dir" . 2>/dev/null; then
-        success "Pre-migration backup created successfully"
-    else
-        error "Failed to create pre-migration backup"
-        rm -rf "$temp_backup_dir"
-        return 1
-    fi
-    
-    # Set proper ownership
-    sudo chown "$PORTAINER_USER:$PORTAINER_USER" "$backup_file"
-    
-    # Clean up temporary directory
-    rm -rf "$temp_backup_dir"
-    
-    info "Backup size: $(du -h "$backup_file" | cut -f1)"
-}
-
-# Stop containers for migration (different from regular backup)
-stop_containers_for_migration() {
-    info "Stopping containers for migration..."
-    
-    # Stop all containers except Portainer itself (we need it for API access)
-    local containers_to_stop=($(sudo -u "$PORTAINER_USER" docker ps --format "table {{.Names}}" | grep -v "^NAMES$" | grep -v "portainer"))
-    
-    for container in "${containers_to_stop[@]}"; do
-        if [[ -n "$container" ]]; then
-            info "Stopping container: $container"
-            sudo -u "$PORTAINER_USER" docker stop "$container" 2>/dev/null || warn "Failed to stop $container"
-        fi
-    done
-    
-    # Wait for containers to stop
-    sleep 5
-    
-    success "Containers stopped for migration"
-}
-
-# Move data folders to new paths
-migrate_data_folders() {
-    local old_portainer_path="$1"
-    local new_portainer_path="$2"
-    local old_tools_path="$3"
-    local new_tools_path="$4"
-    local old_backup_path="$5"
-    local new_backup_path="$6"
-    
-    # Migrate Portainer data
-    if [[ "$old_portainer_path" != "$new_portainer_path" ]]; then
-        info "Migrating Portainer data: $old_portainer_path → $new_portainer_path"
-        
-        # Create new directory
-        sudo mkdir -p "$new_portainer_path"
-        
-        # Move data with preserved permissions
-        if sudo mv "$old_portainer_path"/* "$new_portainer_path/" 2>/dev/null; then
-            # Set ownership
-            sudo chown -R "$PORTAINER_USER:$PORTAINER_USER" "$new_portainer_path"
-            
-            # Remove old directory if empty
-            sudo rmdir "$old_portainer_path" 2>/dev/null || warn "Could not remove old Portainer directory"
-            
-            success "Portainer data migrated successfully"
-        else
-            error "Failed to migrate Portainer data"
-            return 1
-        fi
-    fi
-    
-    # Migrate Tools data
-    if [[ "$old_tools_path" != "$new_tools_path" ]]; then
-        info "Migrating Tools data: $old_tools_path → $new_tools_path"
-        
-        # Create new directory
-        sudo mkdir -p "$new_tools_path"
-        
-        # Move data with preserved permissions
-        if sudo mv "$old_tools_path"/* "$new_tools_path/" 2>/dev/null; then
-            # Set ownership
-            sudo chown -R "$PORTAINER_USER:$PORTAINER_USER" "$new_tools_path"
-            
-            # Remove old directory if empty
-            sudo rmdir "$old_tools_path" 2>/dev/null || warn "Could not remove old Tools directory"
-            
-            success "Tools data migrated successfully"
-        else
-            error "Failed to migrate Tools data"
-            return 1
-        fi
-    fi
-    
-    # Migrate Backup data
-    if [[ "$old_backup_path" != "$new_backup_path" ]]; then
-        info "Migrating Backup data: $old_backup_path → $new_backup_path"
-        
-        # Create new directory
-        sudo mkdir -p "$new_backup_path"
-        
-        # Move data with preserved permissions
-        if sudo mv "$old_backup_path"/* "$new_backup_path/" 2>/dev/null; then
-            # Set ownership
-            sudo chown -R "$PORTAINER_USER:$PORTAINER_USER" "$new_backup_path"
-            
-            # Remove old directory if empty
-            sudo rmdir "$old_backup_path" 2>/dev/null || warn "Could not remove old Backup directory"
-            
-            success "Backup data migrated successfully"
-        else
-            error "Failed to migrate Backup data"
-            return 1
-        fi
-    fi
-}
-
-# Update configurations after migration
-update_configurations_for_migration() {
-    local old_portainer_path="$1"
-    local new_portainer_path="$2"
-    local old_tools_path="$3"
-    local new_tools_path="$4"
-    local old_backup_path="$5"
-    local new_backup_path="$6"
-    
-    info "Updating configurations for new paths..."
-    
-    # Update global configuration
-    PORTAINER_PATH="$new_portainer_path"
-    TOOLS_PATH="$new_tools_path"
-    BACKUP_PATH="$new_backup_path"
-    
-    # Save updated configuration
-    save_config
-    
-    # Update docker-compose files if they exist
-    local portainer_compose="$new_portainer_path/docker-compose.yml"
-    if [[ -f "$portainer_compose" ]]; then
-        info "Updating Portainer compose file paths..."
-        # Only replace path references in volume definitions, not image names
-        sudo sed -i "s|$old_portainer_path/data|$new_portainer_path/data|g" "$portainer_compose" 2>/dev/null || warn "Failed to update Portainer compose paths"
-    fi
-    
-    local npm_compose="$new_tools_path/nginx-proxy-manager/docker-compose.yml"
-    if [[ -f "$npm_compose" ]]; then
-        info "Updating NPM compose file paths..."
-        # Only replace path references in volume definitions, not image names
-        sudo sed -i "s|$old_tools_path/nginx-proxy-manager/data|$new_tools_path/nginx-proxy-manager/data|g" "$npm_compose" 2>/dev/null || warn "Failed to update NPM compose paths"
-        sudo sed -i "s|$old_tools_path/nginx-proxy-manager/letsencrypt|$new_tools_path/nginx-proxy-manager/letsencrypt|g" "$npm_compose" 2>/dev/null || warn "Failed to update NPM compose paths"
-    fi
-    
-    success "Configurations updated successfully"
-}
-
-# Restart services and validate after migration
-restart_and_validate_services() {
-    local stack_inventory="$1"
-    
-    info "Restarting services after migration..."
-    
-    # First, restart Portainer with new paths
-    info "Restarting Portainer..."
-    if sudo -u "$PORTAINER_USER" docker compose -f "$PORTAINER_PATH/docker-compose.yml" up -d; then
-        success "Portainer restarted successfully"
-    else
-        error "Failed to restart Portainer"
-        return 1
-    fi
-    
-    # Wait for Portainer to be ready
-    local max_wait=120  # Increased timeout for containers with health checks
-    local wait_count=0
-    while [[ $wait_count -lt $max_wait ]]; do
-        if curl -s -f "http://localhost:9000/api/system/status" >/dev/null 2>&1; then
-            success "Portainer is ready"
-            break
-        fi
-        sleep 2
-        ((wait_count+=2))
-    done
-    
-    if [[ $wait_count -ge $max_wait ]]; then
-        error "Portainer failed to start within $max_wait seconds"
-        return 1
-    fi
-    
-    # Restart other services using Portainer API
-    info "Restarting other services..."
-    
-    # Get stacks from inventory and restart them
-    local stacks=$(jq -r '.stacks[] | select(.name != "portainer") | .name' "$stack_inventory" 2>/dev/null)
-    
-    if [[ -n "$stacks" ]]; then
-        while IFS= read -r stack_name; do
-            if [[ -n "$stack_name" ]]; then
-                info "Restarting stack: $stack_name"
-                restart_stack_via_api "$stack_name"
-            fi
-        done <<< "$stacks"
-    fi
-    
-    # Validate services are accessible
-    info "Validating services..."
-    
-    # Check Portainer
-    if curl -s -f "http://localhost:9000/api/system/status" >/dev/null 2>&1; then
-        success "Portainer is accessible"
-    else
-        error "Portainer is not accessible"
-        return 1
-    fi
-    
-    # Check nginx-proxy-manager
-    if curl -s -f "http://localhost:81/api/system/status" >/dev/null 2>&1; then
-        success "nginx-proxy-manager is accessible"
-    else
-        warn "nginx-proxy-manager may not be accessible (this is normal if it's not deployed yet)"
-    fi
-    
-    success "Service validation completed"
-}
 
 # Restart a stack via Portainer API
 restart_stack_via_api() {
@@ -3582,7 +3082,8 @@ restore_enhanced_stacks() {
             local stack_name stack_status stack_id compose_content env_vars
             stack_name=$(echo "$stack_json" | jq -r '.name')
             stack_status=$(echo "$stack_json" | jq -r '.status')
-            compose_content=$(echo "$stack_json" | jq -r '.compose_file_content // empty')
+            # Extract the compose file content - it's stored as JSON string containing {"StackFileContent":"..."}
+            compose_content=$(echo "$stack_json" | jq -r '.compose_file_content | if type == "string" then (. | fromjson | .StackFileContent) else . end // empty')
             env_vars=$(echo "$stack_json" | jq -r '.env_variables // []')
             
             # Restore all stacks but handle running vs stopped state appropriately
@@ -4674,100 +4175,81 @@ provide_restore_summary() {
 # Deploy a single stack from backup using Portainer API
 deploy_stack_from_backup() {
     local stack_name="$1"
-    local stack_state_file="$2" 
+    local stack_state_file="$2"
     local jwt_token="$3"
-    
-    # For nginx-proxy-manager, use the compose file directly from restored location
-    if [[ "$stack_name" == "nginx-proxy-manager" ]]; then
-        local compose_file="$NPM_PATH/docker-compose.yml"
-        if [[ ! -f "$compose_file" ]]; then
-            warn "nginx-proxy-manager compose file not found at: $compose_file"
+
+    # Get compose content from stack_states.json (this is the source of truth from backup)
+    info "Retrieving compose content for stack '$stack_name' from backup metadata"
+    local compose_content
+    compose_content=$(jq -r ".stacks[] | select(.name == \"$stack_name\") | .compose_file_content | if type == \"string\" then (. | fromjson | .StackFileContent) else . end // empty" "$stack_state_file" 2>/dev/null)
+
+    if [[ -z "$compose_content" ]]; then
+        warn "No compose content found in backup metadata for stack '$stack_name'"
+        warn "Attempting to use compose file from restored filesystem..."
+
+        # Fallback: try to find compose file on disk
+        local compose_file=""
+        if [[ "$stack_name" == "nginx-proxy-manager" ]]; then
+            compose_file="$NPM_PATH/docker-compose.yml"
+        else
+            compose_file="$TOOLS_PATH/$stack_name/docker-compose.yml"
+        fi
+
+        if [[ -f "$compose_file" ]]; then
+            info "Found compose file at: $compose_file"
+            compose_content=$(cat "$compose_file")
+        else
+            error "Cannot deploy stack '$stack_name': no compose content in backup and no file at $compose_file"
             return 1
         fi
-        
-        info "Deploying nginx-proxy-manager from restored compose file"
-        local npm_compose_content
-        npm_compose_content=$(cat "$compose_file")
-        
-        # Use the proven working method from setup
-        local create_response
-        create_response=$(curl -s -X POST "$PORTAINER_API_URL/stacks/create/standalone/string?endpointId=1" \
-            -H "Authorization: Bearer $jwt_token" \
-            -H "Content-Type: application/json" \
-            -d "{
-                \"method\": \"string\",
-                \"type\": \"standalone\",
-                \"Name\": \"nginx-proxy-manager\",
-                \"StackFileContent\": $(echo "$npm_compose_content" | jq -Rs .),
-                \"Env\": []
-            }")
-        
-        local stack_id
-        stack_id=$(echo "$create_response" | jq -r '.Id // empty')
-        
-        if [[ -n "$stack_id" && "$stack_id" != "null" ]]; then
-            success "Stack '$stack_name' deployed successfully (ID: $stack_id)"
-            return 0
-        else
-            # Check if stack already exists and start it
-            if echo "$create_response" | jq -e '.message' 2>/dev/null | grep -q "already exists"; then
-                info "Stack '$stack_name' already exists, attempting to start it..."
-                
-                # Get existing stack ID
-                local existing_stacks
-                existing_stacks=$(curl -s -X GET "$PORTAINER_API_URL/stacks" -H "Authorization: Bearer $jwt_token")
-                local existing_stack_id
-                existing_stack_id=$(echo "$existing_stacks" | jq -r ".[] | select(.Name == \"$stack_name\") | .Id")
-                
-                if [[ -n "$existing_stack_id" && "$existing_stack_id" != "null" ]]; then
-                    # Start the existing stack
-                    info "Starting existing stack '$stack_name' (ID: $existing_stack_id)"
-                    curl -s -X POST "$PORTAINER_API_URL/stacks/$existing_stack_id/start?endpointId=1" \
-                        -H "Authorization: Bearer $jwt_token" >/dev/null
-                    
-                    success "Stack '$stack_name' started successfully (ID: $existing_stack_id)"
-                    return 0
-                else
-                    warn "Could not find existing stack '$stack_name' to start"
-                    return 1
-                fi
+    fi
+
+    info "Deploying stack '$stack_name' via Portainer API"
+
+    # Deploy stack using Portainer API
+    local create_response
+    create_response=$(curl -s -X POST "$PORTAINER_API_URL/stacks/create/standalone/string?endpointId=1" \
+        -H "Authorization: Bearer $jwt_token" \
+        -H "Content-Type: application/json" \
+        -d "{
+            \"method\": \"string\",
+            \"type\": \"standalone\",
+            \"Name\": \"$stack_name\",
+            \"StackFileContent\": $(echo "$compose_content" | jq -Rs .),
+            \"Env\": []
+        }")
+
+    local stack_id
+    stack_id=$(echo "$create_response" | jq -r '.Id // empty')
+
+    if [[ -n "$stack_id" && "$stack_id" != "null" ]]; then
+        success "Stack '$stack_name' deployed and started successfully (ID: $stack_id)"
+        return 0
+    else
+        # Check if stack already exists
+        if echo "$create_response" | jq -e '.message' 2>/dev/null | grep -q "already exists"; then
+            info "Stack '$stack_name' already exists, attempting to start it..."
+
+            # Get existing stack ID
+            local existing_stacks
+            existing_stacks=$(curl -s -X GET "$PORTAINER_API_URL/stacks" -H "Authorization: Bearer $jwt_token")
+            local existing_stack_id
+            existing_stack_id=$(echo "$existing_stacks" | jq -r ".[] | select(.Name == \"$stack_name\") | .Id")
+
+            if [[ -n "$existing_stack_id" && "$existing_stack_id" != "null" ]]; then
+                # Start the existing stack
+                info "Starting existing stack '$stack_name' (ID: $existing_stack_id)"
+                curl -s -X POST "$PORTAINER_API_URL/stacks/$existing_stack_id/start?endpointId=1" \
+                    -H "Authorization: Bearer $jwt_token" >/dev/null
+
+                success "Stack '$stack_name' started successfully (ID: $existing_stack_id)"
+                return 0
             else
-                warn "Failed to deploy stack '$stack_name'. API response: $create_response"
+                warn "Could not find existing stack '$stack_name' to start"
                 return 1
             fi
-        fi
-    else
-        # For other stacks, use compose files from tools directory
-        local compose_file="$TOOLS_PATH/$stack_name/docker-compose.yml"
-        if [[ ! -f "$compose_file" ]]; then
-            warn "Compose file not found for stack '$stack_name' at: $compose_file"
-            return 1
-        fi
-        
-        info "Deploying stack '$stack_name' from restored compose file"
-        local compose_content
-        compose_content=$(cat "$compose_file")
-        
-        local create_response
-        create_response=$(curl -s -X POST "$PORTAINER_API_URL/stacks/create/standalone/string?endpointId=1" \
-            -H "Authorization: Bearer $jwt_token" \
-            -H "Content-Type: application/json" \
-            -d "{
-                \"method\": \"string\",
-                \"type\": \"standalone\",
-                \"Name\": \"$stack_name\",
-                \"StackFileContent\": $(echo "$compose_content" | jq -Rs .),
-                \"Env\": []
-            }")
-        
-        local stack_id
-        stack_id=$(echo "$create_response" | jq -r '.Id // empty')
-        
-        if [[ -n "$stack_id" && "$stack_id" != "null" ]]; then
-            success "Stack '$stack_name' deployed successfully (ID: $stack_id)"
-            return 0
         else
-            warn "Failed to deploy stack '$stack_name'. API response: $create_response"
+            error "Failed to deploy stack '$stack_name'. API response: $create_response"
             return 1
         fi
     fi
@@ -7283,7 +6765,6 @@ Manage Docker Backup Manager configuration:
 - Change backup paths and retention policies
 - Update service configurations
 - Repair SSH keys for NAS backup functionality
-- Migrate data to new paths
 
 ${BLUE}USAGE:${NC}
     $0 [FLAGS] config
@@ -7298,16 +6779,7 @@ ${BLUE}CONFIGURATION OPTIONS:${NC}
     • Backup retention policies
     • SSL certificate preferences
     • NAS backup settings
-    
-${BLUE}PATH MIGRATION:${NC}
-    If changing paths with existing stacks:
-    1. Automatically detects existing stacks
-    2. Creates pre-migration backup
-    3. Stops services gracefully
-    4. Moves data to new locations
-    5. Updates configurations
-    6. Validates service restart
-    
+
 ${BLUE}SSH KEY MANAGEMENT:${NC}
     • Automatically validates SSH setup
     • Repairs keys if validation fails
@@ -7319,13 +6791,7 @@ ${BLUE}TROUBLESHOOTING:${NC}
         → Run setup first: $0 setup
         → Check file exists: ls -la /etc/docker-backup-manager.conf
         → Create manually or re-run setup
-        
-    ${YELLOW}❌ "Path migration failed"${NC}
-        → Ensure sufficient disk space on destination
-        → Check directory permissions
-        → Review backup created before migration
-        → Rollback if necessary: $0 restore
-        
+
     ${YELLOW}❌ "SSH key validation failed"${NC}
         → Allow repair when prompted
         → Check SSH directory permissions: ls -la ~/.ssh/

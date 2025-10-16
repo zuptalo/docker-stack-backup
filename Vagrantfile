@@ -49,4 +49,49 @@ Vagrant.configure("2") do |config|
       echo "=== Primary server VM setup completed ==="
     SHELL
   end
+
+  # NAS server (simulates remote NAS/backup server)
+  config.vm.define "nas", autostart: false do |nas|
+    nas.vm.hostname = "nas-server"
+    nas.vm.network "private_network", ip: "192.168.56.20"
+
+    # Mount project for access to generated scripts
+    nas.vm.synced_folder ".", "/home/vagrant/docker-stack-backup", type: "virtualbox", owner: "vagrant", group: "vagrant"
+
+    # VirtualBox specific settings
+    nas.vm.provider "virtualbox" do |vb|
+      vb.name = "docker-backup-nas"
+      vb.memory = "1024"
+      vb.cpus = 1
+      vb.linked_clone = true
+    end
+
+    # NAS server setup - minimal requirements for rsync/ssh
+    nas.vm.provision "shell", inline: <<-SHELL
+      set -e
+
+      echo "=== Setting up NAS Server ==="
+
+      # Configure passwordless sudo for vagrant user
+      echo 'vagrant ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers.d/vagrant
+      chmod 440 /etc/sudoers.d/vagrant
+
+      # Install rsync and SSH server for backup synchronization
+      apt-get update -qq
+      apt-get install -y rsync openssh-server
+
+      # Enable SSH server
+      systemctl enable ssh
+      systemctl start ssh
+
+      # Create backup storage directory
+      mkdir -p /mnt/nas-backup
+      chown vagrant:vagrant /mnt/nas-backup
+      chmod 755 /mnt/nas-backup
+
+      echo "=== NAS server setup completed ==="
+      echo "IP Address: 192.168.56.20"
+      echo "Backup Directory: /mnt/nas-backup"
+    SHELL
+  end
 end

@@ -5,6 +5,7 @@ A single-script solution for self-hosters to transform any Ubuntu LTS server int
 
 ## Core Philosophy
 - **Safety First**: Always backup before risky operations
+- **Fully Automated**: Zero manual intervention required for setup and operation
 - **User Choice with Smart Defaults**: Provide options but make sensible assumptions
 - **Production Ready**: Proper error handling, logging, and reliability
 - **Self-Contained**: Minimal external dependencies, maximum portability
@@ -13,10 +14,11 @@ A single-script solution for self-hosters to transform any Ubuntu LTS server int
 Individual self-hosters managing their own Ubuntu servers with sudo access.
 
 ## System Requirements
-- Ubuntu LTS (24.04 recommended)
-- User with sudo privileges (NOT root)
+- Ubuntu LTS (22.04/24.04 recommended)
+- User with **passwordless sudo** privileges (NOT root)
 - Ports 80 and 443 available
 - Internet connectivity for Docker installation and updates
+- **No manual intervention required** - script handles everything
 
 ## Command Structure
 
@@ -67,17 +69,12 @@ Shows help with available commands and usage examples.
 **Dynamic reconfiguration:**
 
 1. **Current State Display**: Show existing configuration values as defaults
-2. **Safety Check**: Inventory deployed stacks
-   - If only Portainer + NPM: Proceed with migration
-   - If additional stacks: Warn user about complexity, require confirmation
-3. **Pre-Migration Backup**: Create safety backup before path changes
-4. **Migration Process**:
-   - Capture all stack configurations via Portainer API
-   - Stop containers gracefully
-   - Move data folders to new paths
-   - Update stack configurations with new paths
-   - Redeploy with updated configurations
-5. **Validation**: Verify all services restart successfully
+2. **Configuration Update**: Modify settings interactively:
+   - Domain and subdomain settings
+   - Backup retention policies
+   - SSH keys for NAS backup functionality
+3. **Configuration Persistence**: Save updated settings to config file
+4. **Note**: Path changes require manual data migration using backup/restore workflow
 
 ### `./backup-manager.sh backup`
 **Comprehensive backup creation:**
