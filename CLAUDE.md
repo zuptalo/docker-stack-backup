@@ -1,4 +1,12 @@
-now# CLAUDE.md
+# CLAUDE.md
+
+> **📚 START HERE**: Before reading this file, please review:
+> - **[README.md](README.md)** - Project overview, quick start, and documentation map
+> - **[STATUS.md](STATUS.md)** - Current implementation status and feature matrix
+>
+> This file contains Claude Code-specific development guidelines and workflows.
+
+---
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 

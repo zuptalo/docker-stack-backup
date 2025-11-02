@@ -15,7 +15,8 @@ sudo ./tests/08-backup/04-test-stack-states-capture.sh
 
 ## Test Status
 
-✅ **50/52 tests passing** (2 skipped)
+✅ **All core tests passing** (some may be skipped based on environment)
+📊 **53 total tests** across 16 categories
 
 ## Test Organization
 

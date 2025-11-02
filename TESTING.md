@@ -2,11 +2,11 @@
 
 ## Overview
 
-Comprehensive test suite with **52 tests** covering all aspects of the Docker Stack Backup Manager, including system preparation, dependencies, configuration, networking, backup/restore operations, and disaster recovery scenarios.
+Comprehensive test suite with **53 tests** covering all aspects of the Docker Stack Backup Manager, including system preparation, dependencies, configuration, networking, backup/restore operations, and disaster recovery scenarios.
 
 ## Test Status
 
-✅ **50/52 tests passing** (2 skipped)
+✅ **All core tests passing** (some may be skipped based on environment)
 ⏱️ **~10 seconds** total execution time
 
 ## Quick Start
