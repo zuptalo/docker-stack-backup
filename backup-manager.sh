@@ -5535,16 +5535,17 @@ generate_nas_script() {
     fi
     
     info "Primary server IP: $PRIMARY_SERVER_IP"
-    
-    # Check if SSH key exists
+
+    # Check if SSH key exists (use sudo since portainer home directory may not be readable)
     SSH_KEY_PATH="/home/$PORTAINER_USER/.ssh/id_ed25519"
-    if [[ ! -f "$SSH_KEY_PATH" ]]; then
+    if ! sudo test -f "$SSH_KEY_PATH"; then
         error "SSH private key not found at: $SSH_KEY_PATH"
-        error "Please ensure Docker backup manager setup has been completed"
+        error "Please run setup first to generate SSH keys:"
+        error "  sudo ./backup-manager.sh --yes setup"
         return 1
     fi
-    
-    # Get the SSH private key
+
+    # Get the SSH private key (requires sudo to read portainer user files)
     SSH_PRIVATE_KEY=$(sudo cat "$SSH_KEY_PATH" | base64 -w 0)
     info "SSH private key extracted and encoded"
     

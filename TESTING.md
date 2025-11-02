@@ -161,6 +161,42 @@ Create snapshots to quickly reset test environment:
 ./tests/snapshot.sh restore base-setup
 ```
 
+### NAS Backup Testing
+
+To test NAS backup functionality, you need unrestricted SSH access between VMs:
+
+**For new installations:**
+The Vagrantfile automatically sets `DOCKER_BACKUP_TEST=true` for unrestricted SSH access.
+
+**For existing VMs (created before this change):**
+You need to regenerate SSH keys with unrestricted access:
+
+```bash
+# On primary VM
+vagrant ssh primary
+export DOCKER_BACKUP_TEST=true
+sudo -E ./backup-manager.sh --yes setup  # -E preserves environment variables
+
+# Generate NAS backup script
+sudo ./backup-manager.sh generate-nas-script
+
+# Copy script to NAS VM
+# The script is in ./nas-backup-client.sh
+
+# On NAS VM
+vagrant ssh nas
+cd docker-stack-backup
+./nas-backup-client.sh test  # Test SSH connection
+./nas-backup-client.sh sync  # Sync backups from primary
+```
+
+**Alternative: Recreate VMs**
+```bash
+# From host machine
+vagrant destroy -f primary nas
+vagrant up primary nas
+```
+
 ## Writing Tests
 
 ### Test Structure
