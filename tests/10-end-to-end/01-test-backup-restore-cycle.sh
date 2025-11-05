@@ -179,7 +179,7 @@ BACKUP_NAME="e2e-test-$(date +%Y%m%d-%H%M%S)"
 
 # Run backup and capture result (disable errexit temporarily)
 set +e
-(cd /home/vagrant/docker-stack-backup && sudo ./backup-manager.sh backup "$BACKUP_NAME" >/dev/null 2>&1)
+(cd /home/vagrant/docker-stack-backup && ./backup-manager.sh --non-interactive backup "$BACKUP_NAME" >/dev/null 2>&1)
 BACKUP_EXIT_CODE=$?
 set -e
 
@@ -298,7 +298,7 @@ printf "\n${CYAN}Step 7: Restoring from backup:${NC}\n"
 
 # Create a non-interactive restore by using printf to provide inputs
 set +e
-RESTORE_OUTPUT=$(cd /home/vagrant/docker-stack-backup && printf "1\ny\n" | sudo ./backup-manager.sh restore 2>&1)
+RESTORE_OUTPUT=$(cd /home/vagrant/docker-stack-backup && printf "1\ny\n" | ./backup-manager.sh restore 2>&1)
 RESTORE_EXIT_CODE=$?
 set -e
 

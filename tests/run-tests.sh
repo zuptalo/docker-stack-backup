@@ -46,7 +46,7 @@ fi
 print_banner() {
     printf "\n"
     printf "${MAGENTA}╔════════════════════════════════════════════════════════════════╗${NC}\n"
-    printf "${MAGENTA}║${NC}  ${CYAN}Docker Stack Backup - Test Suite Runner${NC}                    ${MAGENTA}║${NC}\n"
+    printf "${MAGENTA}║${NC}  ${CYAN}Docker Stack Backup - Test Suite Runner${NC}                       ${MAGENTA}║${NC}\n"
     printf "${MAGENTA}╚════════════════════════════════════════════════════════════════╝${NC}\n"
     printf "\n"
 }
@@ -162,7 +162,7 @@ run_category() {
     category_name=$(get_category_name "$category_dir")
 
     printf "\n${BLUE}╔════════════════════════════════════════════════════════════════╗${NC}\n"
-    printf "${BLUE}║${NC} Category: ${YELLOW}%-50s${NC} ${BLUE}║${NC}\n" "$category_name"
+    printf "${BLUE}║${NC} Category: ${YELLOW}%-52s${NC} ${BLUE}║${NC}\n" "$category_name"
     printf "${BLUE}╚════════════════════════════════════════════════════════════════╝${NC}\n\n"
 
     local tests
@@ -225,13 +225,13 @@ print_final_summary() {
 
     printf "\n"
     printf "${MAGENTA}╔════════════════════════════════════════════════════════════════╗${NC}\n"
-    printf "${MAGENTA}║${NC}  ${CYAN}FINAL TEST SUMMARY${NC}                                          ${MAGENTA}║${NC}\n"
+    printf "${MAGENTA}║${NC}  ${CYAN}FINAL TEST SUMMARY${NC}                                            ${MAGENTA}║${NC}\n"
     printf "${MAGENTA}╠════════════════════════════════════════════════════════════════╣${NC}\n"
-    printf "${MAGENTA}║${NC}  Total Tests:    %-43d ${MAGENTA}║${NC}\n" "$TOTAL_TESTS"
-    printf "${MAGENTA}║${NC}  ${GREEN}Passed:${NC}         %-43d ${MAGENTA}║${NC}\n" "$TOTAL_PASSED"
-    printf "${MAGENTA}║${NC}  ${RED}Failed:${NC}         %-43d ${MAGENTA}║${NC}\n" "$TOTAL_FAILED"
-    printf "${MAGENTA}║${NC}  ${YELLOW}Skipped:${NC}        %-43d ${MAGENTA}║${NC}\n" "$TOTAL_SKIPPED"
-    printf "${MAGENTA}║${NC}  Duration:       %-43s ${MAGENTA}║${NC}\n" "${duration}s"
+    printf "${MAGENTA}║${NC}  Total Tests:    %-46d${MAGENTA}║${NC}\n" "$TOTAL_TESTS"
+    printf "${MAGENTA}║${NC}  Passed:         ${GREEN}%-46d${NC}${MAGENTA}║${NC}\n" "$TOTAL_PASSED"
+    printf "${MAGENTA}║${NC}  Failed:         ${RED}%-46d${NC}${MAGENTA}║${NC}\n" "$TOTAL_FAILED"
+    printf "${MAGENTA}║${NC}  Skipped:        ${YELLOW}%-46d${NC}${MAGENTA}║${NC}\n" "$TOTAL_SKIPPED"
+    printf "${MAGENTA}║${NC}  Duration:       %-46s${MAGENTA}║${NC}\n" "${duration}s"
     printf "${MAGENTA}╚════════════════════════════════════════════════════════════════╝${NC}\n"
 
     if [[ $TOTAL_FAILED -gt 0 ]]; then
@@ -245,12 +245,12 @@ print_final_summary() {
 
     if [[ $TOTAL_FAILED -eq 0 ]]; then
         printf "${GREEN}╔════════════════════════════════════════════════════════════════╗${NC}\n"
-        printf "${GREEN}║${NC}  ${GREEN}✓ ALL TESTS PASSED!${NC}                                         ${GREEN}║${NC}\n"
+        printf "${GREEN}║${NC}  ${GREEN}✓ ALL TESTS PASSED!${NC}                                           ${GREEN}║${NC}\n"
         printf "${GREEN}╚════════════════════════════════════════════════════════════════╝${NC}\n\n"
         return 0
     else
         printf "${RED}╔════════════════════════════════════════════════════════════════╗${NC}\n"
-        printf "${RED}║${NC}  ${RED}✗ SOME TESTS FAILED${NC}                                         ${RED}║${NC}\n"
+        printf "${RED}║${NC}  ${RED}✗ SOME TESTS FAILED${NC}                                           ${RED}║${NC}\n"
         printf "${RED}╚════════════════════════════════════════════════════════════════╝${NC}\n\n"
         return 1
     fi

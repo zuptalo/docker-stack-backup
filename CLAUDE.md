@@ -80,8 +80,8 @@ vagrant ssh
 # Navigate to synced project
 cd ~/docker-stack-backup
 
-# Run tests/commands
-sudo ./backup-manager.sh setup
+# Run commands
+sudo ./backup-manager.sh install
 sudo ./backup-manager.sh backup
 ```
 
@@ -103,18 +103,20 @@ sudo ./backup-manager.sh backup
 
 ```bash
 # === Primary Commands ===
-./backup-manager.sh setup          # Initial system setup (run first)
-./backup-manager.sh config         # Reconfigure settings
+./backup-manager.sh install        # Install system (detects existing installations)
 ./backup-manager.sh backup         # Create backup
 ./backup-manager.sh restore        # Interactive restore
 ./backup-manager.sh schedule       # Setup cron jobs
 ./backup-manager.sh update         # Self-update from GitHub
 
+# === Modify Settings ===
+sudo nano /etc/docker-backup-manager.conf  # Edit configuration directly
+
 # === Development/Testing ===
-./backup-manager.sh --help                    # Show usage
-./backup-manager.sh <command> --help          # Command-specific help
-./backup-manager.sh --non-interactive setup   # CI/automation mode
-./backup-manager.sh --config-file=path setup  # Config from file
+./backup-manager.sh --help                     # Show usage
+./backup-manager.sh <command> --help           # Command-specific help
+./backup-manager.sh --non-interactive install  # CI/automation mode
+./backup-manager.sh --config-file=path install # Config from file
 
 # === Vagrant Operations ===
 vagrant up                         # Start VM
@@ -143,7 +145,8 @@ The script is designed for comprehensive integration testing:
 - Line 0-100: Configuration constants and defaults
 
 ### Core Operations
-- `interactive_setup_configuration()`: Configuration collection (line ~1158)
+- `collect_installation_config()`: Configuration collection during installation
+- `check_existing_installation()`: Detects existing installations to prevent overwrites
 - `validate_*` functions: System state validation (lines 313-683)
 - Backup/restore functions use Portainer API for stack state
 - SSH key management for NAS remote backup integration

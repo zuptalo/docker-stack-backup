@@ -11,7 +11,7 @@ print_test_header "Check Docker Installation"
 if command -v docker >/dev/null 2>&1; then
     assert_command_succeeds "docker is installed" command -v docker
 else
-    printf "${YELLOW}  Docker not installed - will be installed by backup-manager.sh setup${NC}\n"
+    printf "${YELLOW}  Docker not installed - will be installed by backup-manager.sh install${NC}\n"
     skip_test "Docker not installed yet (expected at this stage)"
 fi
 

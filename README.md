@@ -42,8 +42,8 @@ vagrant up primary
 vagrant ssh primary
 cd docker-stack-backup
 
-# Run setup
-sudo ./backup-manager.sh setup
+# Install (detects existing installations automatically)
+sudo ./backup-manager.sh install
 
 # Create a backup
 sudo ./backup-manager.sh backup
@@ -103,14 +103,17 @@ See [TESTING.md](TESTING.md) for complete testing guide.
 ## 📖 Available Commands
 
 ```bash
-./backup-manager.sh setup              # Initial system setup
-./backup-manager.sh config             # Reconfigure settings
+./backup-manager.sh install            # Install system (detects existing installations)
 ./backup-manager.sh backup             # Create backup
 ./backup-manager.sh restore            # Interactive restore
 ./backup-manager.sh schedule           # Setup cron jobs
 ./backup-manager.sh update             # Self-update from GitHub
 ./backup-manager.sh generate-nas-script # Generate NAS backup client
+./backup-manager.sh uninstall          # Complete system cleanup
 ./backup-manager.sh --help             # Show all commands
+
+# Modify settings by editing:
+sudo nano /etc/docker-backup-manager.conf
 ```
 
 ## 🔒 Security Considerations

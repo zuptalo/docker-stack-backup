@@ -54,8 +54,8 @@
 
 | Feature | Implemented | Tested | Code Location | Test File |
 |---------|-------------|--------|---------------|-----------|
-| Interactive configuration | ✅ | ✅ | `interactive_setup_configuration()` | 04-configuration/01-*.sh |
-| Non-interactive mode | ✅ | ✅ | `setup_fixed_configuration()` | 04-configuration/02-*.sh |
+| Installation configuration | ✅ | ✅ | `collect_installation_config()` | 04-configuration/01-*.sh |
+| Installation detection | ✅ | ✅ | `check_existing_installation()` | 04-configuration/02-*.sh |
 | Configuration file management | ✅ | ✅ | `/etc/docker-backup-manager.conf` | 04-configuration/03-*.sh |
 
 ### 4. Network Infrastructure
@@ -250,7 +250,7 @@ When working with this codebase:
 - Lines 1-100: Configuration constants
 - Lines 66-111: Logging functions
 - Lines 313-683: Validation functions
-- Lines 1158+: Interactive configuration
+- Lines 1117+: Installation configuration collection
 - Lines 7700-7900: Command dispatcher
 
 **Testing**: All tests live in `tests/` with numeric prefixes for execution order.

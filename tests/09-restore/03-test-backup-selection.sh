@@ -21,7 +21,7 @@ source "$DEFAULT_CONFIG"
 printf "\n${CYAN}Checking available backups:${NC}\n"
 
 BACKUPS=$(find "$BACKUP_PATH" -name "docker_backup_*.tar.gz" 2>/dev/null | sort -r)
-BACKUP_COUNT=$(echo "$BACKUPS" | grep -c "docker_backup" || echo "0")
+BACKUP_COUNT=$(find "$BACKUP_PATH" -name "docker_backup_*.tar.gz" 2>/dev/null | wc -l | tr -d ' ')
 
 if [[ $BACKUP_COUNT -eq 0 ]]; then
     print_test_result "SKIP" "No backups available"

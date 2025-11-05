@@ -24,7 +24,7 @@ elif command -v docker-compose >/dev/null 2>&1; then
     printf "\n${CYAN}Docker Compose Information:${NC}\n"
     printf "  %s (standalone)\n" "$COMPOSE_VERSION"
 else
-    printf "${YELLOW}  Docker Compose not installed - will be installed by backup-manager.sh setup${NC}\n"
+    printf "${YELLOW}  Docker Compose not installed - will be installed by backup-manager.sh install${NC}\n"
     skip_test "Docker Compose not installed yet (expected at this stage)"
 fi
 

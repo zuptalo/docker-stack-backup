@@ -38,7 +38,7 @@ else
 fi
 
 # Test 3: Test local domain resolution (if DOMAIN_NAME is set)
-if [[ -n "$DOMAIN_NAME" ]]; then
+if [[ -n "${DOMAIN_NAME:-}" ]]; then
     printf "\n${CYAN}Testing local domain resolution:${NC}\n"
     printf "  Domain: %s\n" "$DOMAIN_NAME"
 

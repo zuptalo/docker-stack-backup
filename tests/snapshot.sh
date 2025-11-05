@@ -169,7 +169,7 @@ init_base_snapshots() {
     # Full stack and backup snapshots (manual)
     printf "\n${BLUE}Step 5/5: Remaining snapshots${NC}\n"
     printf "${YELLOW}The following snapshots require manual creation:${NC}\n"
-    printf "  1. full-stack-ready - After running: sudo ./backup-manager.sh setup\n"
+    printf "  1. full-stack-ready - After running: sudo ./backup-manager.sh install\n"
     printf "     Create with: ./tests/snapshot.sh create full-stack-ready\n"
     printf "  2. backup-created - After running: sudo ./backup-manager.sh backup\n"
     printf "     Create with: ./tests/snapshot.sh create backup-created\n\n"

@@ -32,7 +32,7 @@ fi
 printf "\n${CYAN}Listing backup files:${NC}\n"
 
 BACKUPS=$(find "$BACKUP_PATH" -name "docker_backup_*.tar.gz" 2>/dev/null | sort -r)
-BACKUP_COUNT=$(echo "$BACKUPS" | grep -c "docker_backup" || echo "0")
+BACKUP_COUNT=$(find "$BACKUP_PATH" -name "docker_backup_*.tar.gz" 2>/dev/null | wc -l | tr -d ' ')
 
 printf "  Total backups: %d\n" "$BACKUP_COUNT"
 

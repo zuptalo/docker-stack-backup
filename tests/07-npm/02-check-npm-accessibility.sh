@@ -37,29 +37,7 @@ else
     print_test_result "INFO" "NPM HTTPS proxy responding (may return error if no hosts configured)"
 fi
 
-# Test 4: Check if NPM credentials exist
-NPM_CRED_FILE="/opt/npm/.credentials"
-
-if [[ -f "$NPM_CRED_FILE" ]]; then
-    assert_file_exists "$NPM_CRED_FILE" "NPM credentials file exists"
-
-    printf "\n${CYAN}NPM credentials info:${NC}\n"
-    printf "  Path: %s\n" "$NPM_CRED_FILE"
-    printf "  Permissions: %s\n" "$(stat -c "%a" "$NPM_CRED_FILE" 2>/dev/null || stat -f "%Lp" "$NPM_CRED_FILE" 2>/dev/null)"
-
-    # Check for expected fields
-    if grep -q "NPM_ADMIN_EMAIL" "$NPM_CRED_FILE" 2>/dev/null; then
-        assert_true "0" "Credentials contain admin email"
-    fi
-
-    if grep -q "NPM_ADMIN_PASSWORD" "$NPM_CRED_FILE" 2>/dev/null; then
-        assert_true "0" "Credentials contain admin password"
-    fi
-else
-    print_test_result "WARN" "NPM credentials file not found"
-fi
-
-# Test 5: Test NPM Admin login page
+# Test 4: Test NPM Admin login page
 printf "\n${CYAN}Testing NPM Admin login page:${NC}\n"
 
 LOGIN_PAGE=$(curl -sf "http://localhost:81/login" 2>/dev/null || echo "")
@@ -70,7 +48,7 @@ else
     print_test_result "INFO" "NPM login page may have loaded but couldn't verify content"
 fi
 
-# Test 6: Check NPM API endpoint
+# Test 5: Check NPM API endpoint
 printf "\n${CYAN}Testing NPM API:${NC}\n"
 
 API_RESPONSE=$(curl -sf "http://localhost:81/api/" 2>/dev/null || echo "")

@@ -1,32 +1,28 @@
 #!/bin/bash
-# Test: Check CONFIG_FILE is properly set after load_config
+# Test: Check CONFIG_FILE is properly set and working
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/../lib/test-utils.sh"
 
 setup_test_env "${BASH_SOURCE[0]}"
-print_test_header "Check CONFIG_FILE is Properly Set After load_config"
+print_test_header "Check CONFIG_FILE is Properly Set and Working"
 
-# Test 1: Verify CONFIG_FILE is set when default config exists
-if [[ -f "/etc/docker-backup-manager.conf" ]]; then
-    # Source the backup-manager.sh functions (but don't run main)
-    SCRIPT_PATH="$(cd "${SCRIPT_DIR}/../.." && pwd)/backup-manager.sh"
+# Test 1: Verify CONFIG_FILE is hardcoded correctly
+printf "\n${CYAN}Testing hardcoded CONFIG_FILE value:${NC}\n"
 
-    # Extract just the load_config function and test it
-    CONFIG_FILE=""
-    DEFAULT_CONFIG_FILE="/etc/docker-backup-manager.conf"
-    USER_SPECIFIED_CONFIG_FILE="false"
+EXPECTED_CONFIG="/etc/docker-backup-manager.conf"
+# Check if config file exists after installation
+if [[ -f "$EXPECTED_CONFIG" ]]; then
+    assert_true "0" "Config file exists at expected location: $EXPECTED_CONFIG"
 
-    # Simulate load_config behavior
-    if [[ -f "$DEFAULT_CONFIG_FILE" ]]; then
-        config_to_load="$DEFAULT_CONFIG_FILE"
-        CONFIG_FILE="$config_to_load"
+    # Verify it's readable
+    if sudo cat "$EXPECTED_CONFIG" >/dev/null 2>&1; then
+        assert_true "0" "Config file is readable"
+    else
+        assert_true "1" "Config file should be readable"
     fi
-
-    assert_not_equals "" "$CONFIG_FILE" "CONFIG_FILE should be set after loading config"
-    assert_equals "/etc/docker-backup-manager.conf" "$CONFIG_FILE" "CONFIG_FILE should point to default config"
 else
-    print_test_result "SKIP" "Default config file doesn't exist - skipping test"
+    print_test_result "SKIP" "Config file doesn't exist yet - skipping test"
 fi
 
 # Test 2: Verify schedule command doesn't fail with tee error
@@ -75,10 +71,12 @@ else
 fi
 
 printf "\n${CYAN}Test Summary:${NC}\n"
-printf "  This test verifies the fix for the bug where CONFIG_FILE was empty\n"
-printf "  during schedule command, causing 'tee: \\'\\': No such file or directory'\n"
+printf "  This test verifies that CONFIG_FILE is hardcoded and working correctly\n"
+printf "  CONFIG_FILE is now set to: /etc/docker-backup-manager.conf (by convention)\n"
 printf "  \n"
-printf "  Bug location: backup-manager.sh load_config() function\n"
-printf "  Fix: Set CONFIG_FILE=\\\"\\$config_to_load\\\" after loading config\n"
+printf "  Tests:\n"
+printf "  1. Config file exists at expected location\n"
+printf "  2. Schedule command works without tee errors\n"
+printf "  3. Config file can be updated with sudo\n"
 
 print_test_summary

@@ -7,14 +7,28 @@ source "${SCRIPT_DIR}/../lib/test-utils.sh"
 setup_test_env "${BASH_SOURCE[0]}"
 print_test_header "Check Portainer API"
 
+# Check if Docker is installed first
+if ! command -v docker >/dev/null 2>&1; then
+    print_test_result "SKIP" "Docker not installed - skipping Portainer API tests"
+    print_test_summary
+    exit 0
+fi
+
+# Check if Portainer container exists
+if ! docker ps -a --format '{{.Names}}' | grep -q "portainer"; then
+    print_test_result "SKIP" "Portainer container not found - skipping API tests"
+    print_test_summary
+    exit 0
+fi
+
 # Test 1: Check if Portainer is accessible
 printf "\n${CYAN}Testing Portainer API connectivity:${NC}\n"
 
 PORTAINER_URL="http://localhost:9000"
 
-# Wait for Portainer to be ready (max 30 seconds)
+# Wait for Portainer to be ready (max 10 seconds)
 WAIT_TIME=0
-MAX_WAIT=30
+MAX_WAIT=10
 
 while [[ $WAIT_TIME -lt $MAX_WAIT ]]; do
     if curl -sf "$PORTAINER_URL/api/status" >/dev/null 2>&1; then
@@ -27,7 +41,7 @@ done
 if curl -sf "$PORTAINER_URL/api/status" >/dev/null 2>&1; then
     assert_true "0" "Portainer API is accessible"
 else
-    print_test_result "WARN" "Portainer API not accessible (expected if not fully initialized)"
+    print_test_result "SKIP" "Portainer API not accessible (may still be starting)"
     print_test_summary
     exit 0
 fi

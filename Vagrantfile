@@ -42,11 +42,7 @@ Vagrant.configure("2") do |config|
       echo 'vagrant ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers.d/vagrant
       chmod 440 /etc/sudoers.d/vagrant
 
-      # Set test environment flag for backup manager (enables unrestricted SSH for testing)
-      echo 'export DOCKER_BACKUP_TEST=true' >> /home/vagrant/.bashrc
-      echo 'export DOCKER_BACKUP_TEST=true' >> /root/.bashrc
-
-      # Enable SSH server for NAS backup testing from host
+      # Ensure SSH service is running for inter-VM NAS backup testing
       systemctl enable ssh
       systemctl start ssh
 
@@ -79,9 +75,6 @@ Vagrant.configure("2") do |config|
       # Configure passwordless sudo for vagrant user
       echo 'vagrant ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers.d/vagrant
       chmod 440 /etc/sudoers.d/vagrant
-
-      # Set test environment flag for backup manager
-      echo 'export DOCKER_BACKUP_TEST=true' >> /home/vagrant/.bashrc
 
       # Install rsync and SSH server for backup synchronization
       apt-get update -qq

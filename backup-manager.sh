@@ -27,17 +27,14 @@ NON_INTERACTIVE="${NON_INTERACTIVE:-false}"
 AUTO_YES="${AUTO_YES:-false}"
 QUIET_MODE="${QUIET_MODE:-false}"
 PROMPT_TIMEOUT="${PROMPT_TIMEOUT:-60}"  # Default 60 second timeout
-CONFIG_FILE="${CONFIG_FILE:-}"  # Path to configuration file
 
 # Test environment defaults
 TEST_DOMAIN="zuptalo.local"
 TEST_PORTAINER_SUBDOMAIN="pt"
 TEST_NPM_SUBDOMAIN="npm"
 
-# Configuration file (default location, can be overridden by --config-file flag)
-DEFAULT_CONFIG_FILE="/etc/docker-backup-manager.conf"
-CONFIG_FILE=""
-USER_SPECIFIED_CONFIG_FILE=false
+# Configuration file location (hardcoded by convention)
+CONFIG_FILE="/etc/docker-backup-manager.conf"
 
 # Colors for output - enable if terminal supports colors
 if [[ "${TERM:-}" == *"color"* ]] || [[ "${TERM:-}" == "xterm"* ]] || [[ "${TERM:-}" == "screen"* ]] || [[ "${TERM:-}" == "tmux"* ]]; then
@@ -297,7 +294,7 @@ create_recovery_info() {
             recovery_instructions: {
                 backup_creation: "If backup creation failed, check disk space and try again. Previous backups are preserved.",
                 system_restore: "If restore failed, system may be in inconsistent state. Check logs and restore from last known good backup.",
-                initial_setup: "If setup failed, run uninstall command and restart setup. Check prerequisites and network connectivity.",
+                initial_setup: "If installation failed, run uninstall command and restart install. Check prerequisites and network connectivity.",
                 unknown_operation: "Check logs for specific error messages and recovery steps."
             }
         }' > "$recovery_file" 2>/dev/null || true
@@ -880,7 +877,7 @@ check_setup_required() {
     local missing_requirements=()
     
     # Check if configuration file exists
-    if [[ ! -f "$DEFAULT_CONFIG_FILE" ]]; then
+    if [[ ! -f "$CONFIG_FILE" ]]; then
         missing_requirements+=("Configuration file missing")
     fi
     
@@ -909,10 +906,10 @@ check_setup_required() {
             echo "  • $requirement"
         done
         echo
-        info "Please run the setup command first:"
-        printf "  %b\n" "${BLUE}./backup-manager.sh setup${NC}"
+        info "Please run the install command first:"
+        printf "  %b\n" "${BLUE}./backup-manager.sh install${NC}"
         echo
-        info "The setup command will:"
+        info "The install command will:"
         echo "  • Install Docker and required dependencies"
         echo "  • Create system user and directories"
         echo "  • Configure Portainer and nginx-proxy-manager"
@@ -974,7 +971,8 @@ prompt_user() {
         else
             # Timeout occurred
             echo >&2  # New line after timeout
-            warn "Prompt timeout after ${PROMPT_TIMEOUT} seconds, using default: ${timeout_default}"
+            # Send warning directly to terminal (fd 2) to avoid capturing in variable assignments
+            printf "%s [%s] %b\n" "$(date '+%Y-%m-%d %H:%M:%S')" "WARN" "${YELLOW}Prompt timeout after ${PROMPT_TIMEOUT} seconds, using default: ${timeout_default}${NC}" >&2
             printf "%s" "$timeout_default"
         fi
     else
@@ -1033,33 +1031,41 @@ prompt_yes_no() {
 
 # Setup log file with proper permissions
 
+# Generate a secure random password
+generate_random_password() {
+    local length="${1:-20}"
+
+    # Use multiple methods for better compatibility
+    if command -v openssl >/dev/null 2>&1; then
+        # Openssl method - most common
+        openssl rand -base64 32 | tr -dc 'A-Za-z0-9' | head -c"$length"
+    elif [[ -r /dev/urandom ]]; then
+        # /dev/urandom method - fallback
+        tr -dc 'A-Za-z0-9' < /dev/urandom | head -c"$length"
+    else
+        # UUID-based fallback (least secure but universally available)
+        local uuid1 uuid2
+        uuid1=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "$(date +%s%N)")
+        uuid2=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "$(date +%s%N)$$")
+        echo "${uuid1}${uuid2}" | tr -dc 'A-Za-z0-9' | head -c"$length"
+    fi
+    echo  # Newline
+}
+
 # Load configuration from file
 load_config() {
-    # Determine which config file to use
-    local config_to_load=""
-
-    if [[ "$USER_SPECIFIED_CONFIG_FILE" == "true" && -n "$CONFIG_FILE" ]]; then
-        # User explicitly specified a config file
-        config_to_load="$CONFIG_FILE"
-    elif [[ -f "$DEFAULT_CONFIG_FILE" ]]; then
-        # Use default config file if it exists
-        config_to_load="$DEFAULT_CONFIG_FILE"
-    fi
-
-    if [[ -n "$config_to_load" ]]; then
-        info "Loading configuration from: $config_to_load"
+    # Load configuration from hardcoded location if it exists
+    if [[ -f "$CONFIG_FILE" ]]; then
+        info "Loading configuration from: $CONFIG_FILE"
 
         # Validate and source the config file safely
-        if ! bash -n "$config_to_load" 2>/dev/null; then
-            error "Configuration file has syntax errors: $config_to_load"
+        if ! bash -n "$CONFIG_FILE" 2>/dev/null; then
+            error "Configuration file has syntax errors: $CONFIG_FILE"
             exit 1
         fi
 
         # shellcheck source=/dev/null
-        source "$config_to_load"
-
-        # Set CONFIG_FILE to the actual file we loaded
-        CONFIG_FILE="$config_to_load"
+        source "$CONFIG_FILE"
 
         info "Configuration loaded successfully"
     fi
@@ -1093,8 +1099,8 @@ load_config() {
 
 # Save configuration
 save_config() {
-    # Use default config file location for saving during setup
-    local config_file_to_save="${CONFIG_FILE:-$DEFAULT_CONFIG_FILE}"
+    # Use hardcoded config file location for saving during setup
+    local config_file_to_save="$CONFIG_FILE"
     sudo tee "$config_file_to_save" > /dev/null << EOF
 # Docker Backup Manager Configuration
 PORTAINER_PATH="$PORTAINER_PATH"
@@ -1113,205 +1119,142 @@ EOF
     success "Configuration saved to $config_file_to_save"
 }
 
-# Simple fixed configuration - no customization needed
-setup_fixed_configuration() {
-    info "Setting up Docker Backup Manager with default configuration..."
+# Collect installation configuration from user
+collect_installation_config() {
+    info "Collecting installation configuration..."
+    echo
 
-    # Use fixed default paths - no customization
+    # Use fixed default paths
     PORTAINER_USER="portainer"
     PORTAINER_PATH="/opt/portainer"
-    NPM_PATH="$DEFAULT_NPM_PATH"
+    NPM_PATH="/opt/nginx-proxy-manager"
     TOOLS_PATH="/opt/tools"
     BACKUP_PATH="/opt/backup"
 
-    # Initialize domain defaults
+    # Initialize defaults
     DOMAIN_NAME="${DOMAIN_NAME:-$DEFAULT_DOMAIN}"
     PORTAINER_SUBDOMAIN="${PORTAINER_SUBDOMAIN:-$DEFAULT_PORTAINER_SUBDOMAIN}"
     NPM_SUBDOMAIN="${NPM_SUBDOMAIN:-$DEFAULT_NPM_SUBDOMAIN}"
-    
-    # Initialize other defaults
     BACKUP_RETENTION="${BACKUP_RETENTION:-$DEFAULT_BACKUP_RETENTION}"
     REMOTE_RETENTION="${REMOTE_RETENTION:-$DEFAULT_REMOTE_RETENTION}"
 
-    # Only domain configuration is needed for SSL certificates
+    # Collect configuration (skip in test environment)
     if ! is_test_environment; then
-        printf "%b\n" "${BLUE}=== Domain Configuration ===${NC}"
-        echo "Configure your domain for SSL certificates and service access."
+        printf "%b\n" "${BLUE}=== Installation Configuration ===${NC}"
+        echo "Please provide the following information (press Enter for defaults):"
         echo
 
-        DOMAIN_NAME=$(prompt_user "Domain name (e.g., example.com)" "$DOMAIN_NAME")
+        DOMAIN_NAME=$(prompt_user "Domain name" "$DOMAIN_NAME")
         PORTAINER_SUBDOMAIN=$(prompt_user "Portainer subdomain" "$PORTAINER_SUBDOMAIN")
-        NPM_SUBDOMAIN=$(prompt_user "NPM admin subdomain" "$NPM_SUBDOMAIN")
+        NPM_SUBDOMAIN=$(prompt_user "NPM subdomain" "$NPM_SUBDOMAIN")
+        BACKUP_RETENTION=$(prompt_user "Local backup retention (days)" "$BACKUP_RETENTION")
+        REMOTE_RETENTION=$(prompt_user "Remote backup retention (days)" "$REMOTE_RETENTION")
 
+        # Calculate URLs
+        PORTAINER_URL="${PORTAINER_SUBDOMAIN}.${DOMAIN_NAME}"
+        NPM_URL="${NPM_SUBDOMAIN}.${DOMAIN_NAME}"
+
+        # Show summary
         echo
-        printf "%b\n" "${BLUE}Configuration summary:${NC}"
-        echo "  • System user: $PORTAINER_USER (fixed)"
-        echo "  • Portainer path: $PORTAINER_PATH (fixed)"
-        echo "  • NPM path: $NPM_PATH (fixed)"
-        echo "  • Tools path: $TOOLS_PATH (fixed)"
-        echo "  • Backup path: $BACKUP_PATH (fixed)"
+        printf "%b\n" "${BLUE}=== Configuration Summary ===${NC}"
         echo "  • Domain: $DOMAIN_NAME"
-        echo "  • Portainer URL: https://$PORTAINER_SUBDOMAIN.$DOMAIN_NAME"
-        echo "  • NPM admin URL: https://$NPM_SUBDOMAIN.$DOMAIN_NAME"
-        echo
-        printf "%b\n" "${YELLOW}📁 Important: Store your stack files in /opt/tools/name-of-the-stack${NC}"
+        echo "  • Portainer: $PORTAINER_URL"
+        echo "  • NPM: $NPM_URL"
+        echo "  • System user: $PORTAINER_USER"
+        echo "  • Portainer path: $PORTAINER_PATH"
+        echo "  • NPM path: $NPM_PATH"
+        echo "  • Tools path: $TOOLS_PATH"
+        echo "  • Backup path: $BACKUP_PATH"
+        echo "  • Local retention: $BACKUP_RETENTION days"
+        echo "  • Remote retention: $REMOTE_RETENTION days"
         echo
 
-        if ! prompt_yes_no "Continue with this configuration?" "y"; then
-            info "Setup cancelled by user"
+        if ! prompt_yes_no "Proceed with installation?" "y"; then
+            info "Installation cancelled by user"
             exit 0
         fi
+    else
+        # Test environment - use defaults silently
+        PORTAINER_URL="${PORTAINER_SUBDOMAIN}.${DOMAIN_NAME}"
+        NPM_URL="${NPM_SUBDOMAIN}.${DOMAIN_NAME}"
     fi
-
-    # Set URLs for configuration file
-    PORTAINER_URL="${PORTAINER_SUBDOMAIN}.${DOMAIN_NAME}"
-    NPM_URL="${NPM_SUBDOMAIN}.${DOMAIN_NAME}"
 
     # Save configuration
     save_config
-    info "Configuration saved successfully"
+    success "Configuration saved to $CONFIG_FILE"
 }
 
-# Interactive setup configuration with user choice
-interactive_setup_configuration() {
-    printf "%b\n" "${BLUE}=== Docker Backup Manager Initial Setup ===${NC}"
-    echo
-    echo "Welcome to Docker Backup Manager setup!"
-    echo
-    printf "%b\n" "${BLUE}Current default configuration:${NC}"
-    echo "  • System user: $PORTAINER_USER"
-    echo "  • Portainer data path: $PORTAINER_PATH"
-    echo "  • Tools data path: $TOOLS_PATH"
-    echo "  • Backup storage path: $BACKUP_PATH"
-    echo "  • Local backup retention: $BACKUP_RETENTION days"
-    echo "  • Remote backup retention: $REMOTE_RETENTION days"
-    echo "  • Domain name: $DOMAIN_NAME"
-    echo "  • Portainer subdomain: $PORTAINER_SUBDOMAIN"
-    echo "  • NPM admin subdomain: $NPM_SUBDOMAIN"
-    echo
-    printf "%b\n" "${BLUE}Setup options:${NC}"
-    echo "1) Use default configuration (recommended for most users)"
-    echo "2) Customize configuration interactively"
-    echo "3) Show advanced configuration details"
-    echo "4) Exit setup"
-    echo
-    
-    # In test environment, automatically choose option 1 (default configuration)
-    if is_test_environment; then
-        setup_choice="1"
-        info "Test environment: automatically choosing default configuration"
-    else
-        read -p "Choose setup option [1-4]: " setup_choice
+# Check for existing installation
+check_existing_installation() {
+    local has_config=false
+    local has_user=false
+    local has_docker=false
+    local has_containers=false
+
+    # Check for config file
+    if [[ -f "$CONFIG_FILE" ]]; then
+        has_config=true
     fi
-    
-    case "$setup_choice" in
-        1)
-            info "Using default configuration"
-            confirm_configuration
-            ;;
-        2)
-            info "Starting interactive configuration"
-            interactive_configuration
-            ;;
-        3)
-            show_advanced_configuration_details
-            interactive_setup_configuration
-            ;;
-        4)
-            info "Setup cancelled by user"
-            exit 0
-            ;;
-        *)
-            warn "Invalid option selected. Using default configuration."
-            confirm_configuration
-            ;;
-    esac
-}
 
-# Show advanced configuration details
-show_advanced_configuration_details() {
-    echo
-    printf "%b\n" "${BLUE}=== Advanced Configuration Details ===${NC}"
-    echo
-    printf "%b\n" "${BLUE}System User ($PORTAINER_USER):${NC}"
-    echo "  • Used for running Docker containers and backup operations"
-    echo "  • Must have Docker group access and sudo privileges"
-    echo "  • Default 'portainer' is suitable for most installations"
-    echo
-    printf "%b\n" "${BLUE}Portainer Data Path ($PORTAINER_PATH):${NC}"
-    echo "  • Stores Portainer configuration and container data"
-    echo "  • Should be on a persistent volume with adequate space"
-    echo "  • Default /opt/portainer is standard for system installations"
-    echo
-    printf "%b\n" "${BLUE}Tools Data Path ($TOOLS_PATH):${NC}"
-    echo "  • Stores nginx-proxy-manager and other tool configurations"
-    echo "  • Should be on the same volume as Portainer for consistency"
-    echo "  • Default /opt/tools follows standard directory structure"
-    echo
-    printf "%b\n" "${BLUE}Backup Storage Path ($BACKUP_PATH):${NC}"
-    echo "  • Where backup archives are stored locally"
-    echo "  • Should have sufficient space for your backup retention policy"
-    echo "  • Default /opt/backup is accessible system-wide"
-    echo
-    printf "%b\n" "${BLUE}Backup Retention:${NC}"
-    echo "  • Local retention: How many backups to keep locally"
-    echo "  • Remote retention: How many backups to keep on remote storage"
-    echo "  • Higher retention uses more storage but provides more restore points"
-    echo
-    printf "%b\n" "${BLUE}Domain Configuration:${NC}"
-    echo "  • Domain name: Your main domain for accessing services"
-    echo "  • Subdomains: Used for accessing Portainer and nginx-proxy-manager"
-    echo "  • SSL certificates will be automatically requested if DNS is configured"
-    echo
-    echo "Press Enter to continue..."
-    read
-}
-
-# Interactive configuration
-interactive_configuration() {
-    printf "%b\n" "${BLUE}=== Interactive Configuration ===${NC}"
-    echo
-    echo "Configure each setting (press Enter to keep default):"
-    echo
-    
-    PORTAINER_USER=$(prompt_user "System user" "$PORTAINER_USER")
-    PORTAINER_PATH=$(prompt_user "Portainer data path" "$PORTAINER_PATH")
-    TOOLS_PATH=$(prompt_user "Tools data path" "$TOOLS_PATH")
-    BACKUP_PATH=$(prompt_user "Backup storage path" "$BACKUP_PATH")
-    BACKUP_RETENTION=$(prompt_user "Local backup retention (days)" "$BACKUP_RETENTION")
-    REMOTE_RETENTION=$(prompt_user "Remote backup retention (days)" "$REMOTE_RETENTION")
-    DOMAIN_NAME=$(prompt_user "Domain name" "$DOMAIN_NAME")
-    PORTAINER_SUBDOMAIN=$(prompt_user "Portainer subdomain" "$PORTAINER_SUBDOMAIN")
-    NPM_SUBDOMAIN=$(prompt_user "NPM admin subdomain" "$NPM_SUBDOMAIN")
-    
-    confirm_configuration
-}
-
-# Confirm configuration before proceeding
-confirm_configuration() {
-    # Calculate URLs
-    PORTAINER_URL="${PORTAINER_SUBDOMAIN}.${DOMAIN_NAME}"
-    NPM_URL="${NPM_SUBDOMAIN}.${DOMAIN_NAME}"
-    
-    echo
-    printf "%b\n" "${BLUE}=== Final Configuration Summary ===${NC}"
-    echo "Domain: $DOMAIN_NAME"
-    echo "Portainer URL: https://$PORTAINER_SUBDOMAIN.$DOMAIN_NAME"
-    echo "NPM URL: https://$NPM_SUBDOMAIN.$DOMAIN_NAME"
-    echo "Portainer Path: $PORTAINER_PATH"
-    echo "Tools Path: $TOOLS_PATH"
-    echo "Backup Path: $BACKUP_PATH"
-    echo "Local Retention: $BACKUP_RETENTION days"
-    echo "Remote Retention: $REMOTE_RETENTION days"
-    echo "System User: $PORTAINER_USER"
-    echo
-    
-    if ! prompt_yes_no "Save this configuration?" "y"; then
-        echo "Configuration not saved. Exiting."
-        exit 0
+    # Check for portainer user
+    if id "$DEFAULT_PORTAINER_USER" >/dev/null 2>&1; then
+        has_user=true
     fi
-    
-    save_config
+
+    # Check for Docker and containers
+    if command -v docker >/dev/null 2>&1; then
+        has_docker=true
+        if sudo -u "${DEFAULT_PORTAINER_USER}" docker ps -a --format "{{.Names}}" 2>/dev/null | grep -q "portainer"; then
+            has_containers=true
+        fi
+    fi
+
+    # If any installation artifacts exist, show existing installation message
+    if [[ "$has_config" == "true" ]] || [[ "$has_user" == "true" ]] || [[ "$has_containers" == "true" ]]; then
+        echo
+        printf "%b\n" "${YELLOW}⚠️  Existing installation detected!${NC}"
+        echo
+        echo "Found the following:"
+
+        if [[ "$has_config" == "true" ]]; then
+            echo "  • Config file: $CONFIG_FILE"
+            if [[ -r "$CONFIG_FILE" ]]; then
+                source "$CONFIG_FILE" 2>/dev/null || true
+                echo "    - Domain: ${DOMAIN_NAME:-N/A}"
+                echo "    - Portainer path: ${PORTAINER_PATH:-N/A}"
+                echo "    - Backup path: ${BACKUP_PATH:-N/A}"
+            fi
+        fi
+
+        if [[ "$has_user" == "true" ]]; then
+            echo "  • System user: $DEFAULT_PORTAINER_USER (exists)"
+        fi
+
+        if [[ "$has_docker" == "true" ]]; then
+            echo "  • Docker: installed"
+        fi
+
+        if [[ "$has_containers" == "true" ]]; then
+            echo "  • Containers: portainer and possibly others (running)"
+        fi
+
+        echo
+        printf "%b\n" "${BLUE}To reinstall:${NC}"
+        echo "  1. Review current setup: cat $CONFIG_FILE"
+        echo "  2. Back up important data if needed: $0 backup"
+        echo "  3. Clean up existing installation: $0 uninstall"
+        echo "  4. Run install again: $0 install"
+        echo
+        printf "%b\n" "${BLUE}To modify settings:${NC}"
+        echo "  • Edit configuration file: sudo nano $CONFIG_FILE"
+        echo "  • Change retention, domain, paths as needed"
+        echo "  • Note: Domain changes require manual NPM proxy host updates"
+        echo
+
+        return 1
+    fi
+
+    return 0
 }
 
 
@@ -1598,10 +1541,12 @@ verify_dns_and_ssl() {
                 warn "SSL certificates will not be requested automatically"
                 warn "You can configure SSL later through the nginx-proxy-manager UI"
                 echo
-                info "After DNS records are configured, you can:"
-                info "1. Access nginx-proxy-manager at: http://$public_ip:81"
+                info "For now, access nginx-proxy-manager at: http://$public_ip:81"
+                echo
+                info "After DNS records are configured (pointing to $public_ip):"
+                info "1. Access nginx-proxy-manager at: http://$NPM_URL:81"
                 info "2. Navigate to SSL Certificates and request certificates"
-                info "3. Edit your proxy hosts to use HTTPS"
+                info "3. Edit your proxy hosts to enable HTTPS"
                 echo
                 
                 # Set a flag to skip SSL certificate requests
@@ -1609,7 +1554,7 @@ verify_dns_and_ssl() {
                 return 0
                 ;;
             3)
-                info "Setup cancelled. Please configure DNS records and run setup again."
+                info "Installation cancelled. Please configure DNS records and run install again."
                 exit 0
                 ;;
             *)
@@ -1731,7 +1676,12 @@ setup_ssh_keys() {
     success "Ed25519 SSH key pair generated"
     
     # Set up SSH access for backups
-    if ! is_test_environment; then
+    # Use unrestricted access for test environments (.local domains) and restricted for production
+    if is_test_environment || [[ "${DOMAIN_NAME:-}" == *.local ]]; then
+        # Full SSH access for test environment (needed for SSH connection testing)
+        sudo -u "$PORTAINER_USER" cp "$ssh_pub_path" "$auth_keys_path"
+        info "Set up full SSH access for test environment"
+    else
         # Restricted SSH access for production
         local public_key_content=$(sudo -u "$PORTAINER_USER" cat "$ssh_pub_path")
         sudo -u "$PORTAINER_USER" tee "$auth_keys_path" > /dev/null << EOF
@@ -1739,10 +1689,6 @@ setup_ssh_keys() {
 command="rsync --server --daemon .",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty $public_key_content
 EOF
         info "Set up restricted SSH access for production"
-    else
-        # Full SSH access for test environment
-        sudo -u "$PORTAINER_USER" cp "$ssh_pub_path" "$auth_keys_path"
-        info "Set up full SSH access for test environment"
     fi
     
     # Set proper permissions
@@ -1876,15 +1822,23 @@ generate_password() {
 
 # Prepare nginx-proxy-manager files for Portainer deployment
 prepare_nginx_proxy_manager_files() {
+    local admin_password="${1:-}"
+
+    if [[ -z "$admin_password" ]]; then
+        error "Admin password is required to prepare nginx-proxy-manager files"
+        return 1
+    fi
+
     info "Preparing nginx-proxy-manager files..."
-    
+
     local npm_path="$NPM_PATH"
-    
+    local npm_admin_email="admin@${DOMAIN_NAME}"
+
     # Create docker-compose.yml for nginx-proxy-manager with absolute paths
     sudo -u "$PORTAINER_USER" tee "$npm_path/docker-compose.yml" > /dev/null << EOF
 services:
   nginx-proxy-manager:
-    image: 'jc21/nginx-proxy-manager:latest'
+    image: 'zuptalo/nginx-proxy-manager:develop'
     container_name: nginx-proxy-manager
     restart: always
     ports:
@@ -1899,75 +1853,61 @@ services:
     environment:
       DB_SQLITE_FILE: "/data/database.sqlite"
       DISABLE_IPV6: 'true'
+      INITIAL_ADMIN_EMAIL: "$npm_admin_email"
+      INITIAL_ADMIN_PASSWORD: "$admin_password"
 
 networks:
   prod-network:
     external: true
 EOF
 
-    # Create credentials file with domain-based values
-    local npm_admin_email="admin@${DOMAIN_NAME}"
-    local npm_admin_password="AdminPassword123!"
-    sudo -u "$PORTAINER_USER" tee "$npm_path/.credentials" > /dev/null << EOF
-NPM_ADMIN_EMAIL=${npm_admin_email}
-NPM_ADMIN_PASSWORD=${npm_admin_password}
-NPM_API_URL=http://localhost:81/api
-EOF
-
     # Create data directories with proper ownership
     sudo -u "$PORTAINER_USER" mkdir -p "$npm_path/data" "$npm_path/letsencrypt"
     sudo chmod 755 "$npm_path/data" "$npm_path/letsencrypt"
-    
+
     success "nginx-proxy-manager files prepared"
     info "Compose file: $npm_path/docker-compose.yml"
-    info "Credentials file: $npm_path/.credentials"
     info "Data directories: $npm_path/data, $npm_path/letsencrypt"
     info "Will be deployed as a Portainer stack"
 }
 
 # Configure nginx-proxy-manager via API
 configure_nginx_proxy_manager() {
-    info "Configuring nginx-proxy-manager..."
-    
-    local npm_path="$NPM_PATH"
-    
-    # Load custom credentials from setup
-    if [[ -f "$npm_path/.credentials" ]]; then
-        source "$npm_path/.credentials" || true
+    local admin_password="${1:-}"
+
+    if [[ -z "$admin_password" ]]; then
+        error "Admin password is required for nginx-proxy-manager configuration"
+        return 1
     fi
-    
-    # nginx-proxy-manager always starts with default credentials
-    local auth_email="admin@example.com"
-    local auth_password="changeme"
-    
+
+    info "Configuring nginx-proxy-manager..."
+
+    local npm_path="$NPM_PATH"
+
+    # Define credentials (automatically created by the container via environment variables)
+    local NPM_ADMIN_EMAIL="admin@${DOMAIN_NAME}"
+    local NPM_ADMIN_PASSWORD="$admin_password"
+
     # Wait for nginx-proxy-manager to complete initialization
+    # The container automatically creates the admin user using INITIAL_ADMIN_EMAIL and INITIAL_ADMIN_PASSWORD
     info "Waiting for nginx-proxy-manager to complete initialization..."
     local max_attempts=30  # Increased to 5 minutes (30 * 10 seconds)
     local attempt=1
     local api_ready=false
-    
+
     while [[ $attempt -le $max_attempts ]]; do
         # First check if the web interface is responsive
         if curl -s --connect-timeout 5 "http://localhost:81/" > /dev/null 2>&1; then
             # Check if API endpoint is available
             local api_status=$(curl -s -w "%{http_code}" -o /dev/null --connect-timeout 5 "http://localhost:81/api/schema" 2>/dev/null || echo "000")
-            
+
             if [[ "$api_status" == "200" ]]; then
-                # Try to authenticate with default credentials
-                local test_token
-                test_token=$(curl -s --connect-timeout 5 -X POST "http://localhost:81/api/tokens" \
-                    -H "Content-Type: application/json" \
-                    -d "{\"identity\": \"$auth_email\", \"secret\": \"$auth_password\"}" 2>/dev/null | \
-                    jq -r '.token // empty' 2>/dev/null)
-                
-                if [[ -n "$test_token" && "$test_token" != "null" ]]; then
-                    info "nginx-proxy-manager API is ready and authenticated"
-                    api_ready=true
-                    break
-                fi
+                info "nginx-proxy-manager API is ready"
+                api_ready=true
+                break
             fi
         fi
-        
+
         # Progress indicator with more detailed status
         if [[ $((attempt % 6)) -eq 0 ]]; then
             info "Still waiting for nginx-proxy-manager initialization... (${attempt}0 seconds elapsed)"
@@ -1975,7 +1915,7 @@ configure_nginx_proxy_manager() {
         else
             echo -n "."
         fi
-        
+
         sleep 10
         ((attempt++))
     done
@@ -1988,15 +1928,13 @@ configure_nginx_proxy_manager() {
         warn "2. Complete the first-run setup manually at: http://localhost:81"
         warn "3. Check nginx-proxy-manager logs: docker logs nginx-proxy-manager"
         warn ""
-        warn "Default credentials for manual setup: admin@example.com / changeme"
-        warn ""
-        
+
         # Offer to continue with manual setup option
         if ! is_test_environment; then
             echo
             if prompt_yes_no "Would you like to continue setup and configure nginx-proxy-manager manually later?" "y"; then
                 info "Continuing setup - you can configure nginx-proxy-manager manually later"
-                info "Access it at: http://localhost:81 with admin@example.com / changeme"
+                info "Access it at: http://localhost:81"
                 return 0
             else
                 error "Setup cannot continue without nginx-proxy-manager configuration"
@@ -2008,74 +1946,24 @@ configure_nginx_proxy_manager() {
             return 0
         fi
     fi
-    
-    # Login and get token (using default credentials first)
+
+    # Authenticate with configured user
+    info "Authenticating with nginx-proxy-manager..."
     local token
     token=$(curl -s -X POST "http://localhost:81/api/tokens" \
         -H "Content-Type: application/json" \
-        -d "{\"identity\": \"$auth_email\", \"secret\": \"$auth_password\"}" | \
+        -d "{\"identity\": \"$NPM_ADMIN_EMAIL\", \"secret\": \"$NPM_ADMIN_PASSWORD\"}" | \
         jq -r '.token // empty')
-    
+
     if [[ -z "$token" ]]; then
         warn "Failed to authenticate with nginx-proxy-manager"
-        warn "nginx-proxy-manager is running but API configuration failed"
+        warn "nginx-proxy-manager is running but API authentication failed"
         warn "You can configure it manually at: http://localhost:81"
-        warn "Default credentials: admin@example.com / changeme"
         return 0
     fi
-    
-    info "Successfully authenticated with nginx-proxy-manager API"
-    
-    # Update admin user profile and password (skip in test environment to avoid conflicts)
-    if ! is_test_environment; then
-        local user_id
-        user_id=$(curl -s -H "Authorization: Bearer $token" "http://localhost:81/api/users" | \
-            jq -r '.[] | select(.email == "admin@example.com") | .id')
-        
-        if [[ -n "$user_id" ]]; then
-            # Update user profile (name, nickname, email)
-            info "Updating admin user profile..."
-            curl -s -X PUT "http://localhost:81/api/users/$user_id" \
-                -H "Authorization: Bearer $token" \
-                -H "Content-Type: application/json" \
-                -d "{
-                    \"name\": \"Zuptalo\",
-                    \"nickname\": \"Zupi\",
-                    \"email\": \"$NPM_ADMIN_EMAIL\",
-                    \"roles\": [\"admin\"],
-                    \"is_disabled\": false
-                }" >/dev/null
-            
-            # Update admin password
-            info "Updating admin password..."
-            curl -s -X PUT "http://localhost:81/api/users/$user_id/auth" \
-                -H "Authorization: Bearer $token" \
-                -H "Content-Type: application/json" \
-                -d "{
-                    \"type\": \"password\",
-                    \"current\": \"changeme\",
-                    \"secret\": \"$NPM_ADMIN_PASSWORD\"
-                }" >/dev/null
-            
-            success "Updated admin user profile and password"
-            
-            # Get new authentication token with updated credentials
-            info "Re-authenticating with updated credentials..."
-            local new_token
-            new_token=$(curl -s -X POST "http://localhost:81/api/tokens" \
-                -H "Content-Type: application/json" \
-                -d "{\"identity\": \"$NPM_ADMIN_EMAIL\", \"secret\": \"$NPM_ADMIN_PASSWORD\"}" | \
-                jq -r '.token // empty')
-            
-            if [[ -n "$new_token" ]]; then
-                success "Re-authenticated successfully with updated credentials"
-                token="$new_token"
-            else
-                warn "Re-authentication failed, using original token"
-            fi
-        fi
-    fi
-    
+
+    success "Successfully authenticated with nginx-proxy-manager API"
+
     # Create proxy hosts for both services
     create_portainer_proxy_host "$token"
     create_npm_proxy_host "$token"
@@ -2147,7 +2035,7 @@ create_portainer_proxy_host() {
             if is_test_environment; then
                 info "SSL skipped in test environment"
             else
-                info "SSL skipped - configure DNS records and rerun setup for HTTPS"
+                info "SSL skipped - configure DNS records and rerun install for HTTPS"
             fi
         fi
     else
@@ -2223,7 +2111,7 @@ create_npm_proxy_host() {
             if is_test_environment; then
                 info "SSL skipped in test environment"
             else
-                info "SSL skipped - configure DNS records and rerun setup for HTTPS"
+                info "SSL skipped - configure DNS records and rerun install for HTTPS"
             fi
         fi
     else
@@ -2234,11 +2122,13 @@ create_npm_proxy_host() {
 
 # Deploy Portainer
 deploy_portainer() {
+    local admin_password="${1:-}"
+
     info "Deploying Portainer..."
-    
+
     # Use default Portainer setup - no pre-configured admin password
     # Portainer will prompt for admin setup on first access
-    
+
     # Create docker-compose.yml for Portainer
     sudo -u "$PORTAINER_USER" tee "$PORTAINER_PATH/docker-compose.yml" > /dev/null << EOF
 services:
@@ -2261,12 +2151,12 @@ networks:
 EOF
 
     # Create credentials file with setup credentials (meeting Portainer requirements)
-    local portainer_admin_password="AdminPassword123!"
+    local portainer_admin_password="$admin_password"
     local portainer_admin_username="admin@${DOMAIN_NAME}"
     sudo -u "$PORTAINER_USER" tee "$PORTAINER_PATH/.credentials" > /dev/null << EOF
 PORTAINER_ADMIN_USERNAME=${portainer_admin_username}
 PORTAINER_ADMIN_PASSWORD=${portainer_admin_password}
-PORTAINER_URL=https://${PORTAINER_URL}
+PORTAINER_URL=${PORTAINER_URL}
 PORTAINER_API_URL=http://localhost:9000/api
 EOF
 
@@ -2286,8 +2176,13 @@ EOF
     while [[ $attempt -le $max_attempts ]]; do
         if sudo -u "$PORTAINER_USER" docker ps | grep -q "portainer" && curl -s -f "http://localhost:9000/api/system/status" >/dev/null 2>&1; then
             success "Portainer deployed successfully"
-            info "Portainer URL: https://$PORTAINER_URL"
-            
+            # Show URL with appropriate protocol based on SSL configuration
+            if is_test_environment || [[ "${SKIP_SSL_CERTIFICATES:-false}" == "true" ]]; then
+                info "Portainer URL: http://$PORTAINER_URL"
+            else
+                info "Portainer URL: https://$PORTAINER_URL"
+            fi
+
             # Initialize Portainer admin user
             initialize_portainer_admin
             return 0
@@ -2296,11 +2191,16 @@ EOF
         sleep 10
         ((attempt++))
     done
-    
+
     # Even if the API check fails, if the container is running, consider it a success
     if sudo -u "$PORTAINER_USER" docker ps | grep -q "portainer"; then
         warn "Portainer container is running but API may not be ready yet"
-        info "Portainer URL: https://$PORTAINER_URL"
+        # Show URL with appropriate protocol based on SSL configuration
+        if is_test_environment || [[ "${SKIP_SSL_CERTIFICATES:-false}" == "true" ]]; then
+            info "Portainer URL: http://$PORTAINER_URL"
+        else
+            info "Portainer URL: https://$PORTAINER_URL"
+        fi
         info "Credentials stored in: $PORTAINER_PATH/.credentials"
         return 0
     else
@@ -4157,8 +4057,17 @@ provide_restore_summary() {
     
     info "\n" "=== SERVICE ACCESS ==="
     if [[ -n "$DOMAIN_NAME" ]]; then
-        info "🌐 Portainer: https://$PORTAINER_SUBDOMAIN.$DOMAIN_NAME"
-        info "🌐 nginx-proxy-manager: https://$NPM_SUBDOMAIN.$DOMAIN_NAME"
+        # Show URLs with appropriate protocol based on SSL configuration
+        if ! is_test_environment && [[ "${SKIP_SSL_CERTIFICATES:-false}" != "true" ]]; then
+            info "🌐 Portainer: https://$PORTAINER_SUBDOMAIN.$DOMAIN_NAME"
+            info "🌐 nginx-proxy-manager: https://$NPM_SUBDOMAIN.$DOMAIN_NAME"
+        else
+            info "🌐 Portainer: http://$PORTAINER_SUBDOMAIN.$DOMAIN_NAME"
+            info "🌐 nginx-proxy-manager: http://$NPM_SUBDOMAIN.$DOMAIN_NAME"
+            if [[ "${SKIP_SSL_CERTIFICATES:-false}" == "true" ]]; then
+                info "  (HTTPS not configured - using HTTP)"
+            fi
+        fi
     else
         info "🌐 Portainer: http://localhost:9000"
         info "🌐 nginx-proxy-manager: http://localhost:81"
@@ -5191,10 +5100,7 @@ restore_backup() {
     
     # Clean up temporary directory
     rm -rf "$TEMP_DIR"
-    
-    # Restart Portainer after restore to ensure clean state consistency
-    restart_portainer_after_restore
-    
+
     # Validate system state after restore
     if validate_system_state "restore"; then
         success "Restore completed and validated successfully"
@@ -5540,17 +5446,18 @@ generate_nas_script() {
     SSH_KEY_PATH="/home/$PORTAINER_USER/.ssh/id_ed25519"
     if ! sudo test -f "$SSH_KEY_PATH"; then
         error "SSH private key not found at: $SSH_KEY_PATH"
-        error "Please run setup first to generate SSH keys:"
-        error "  sudo ./backup-manager.sh --yes setup"
+        error "Please run install first to generate SSH keys:"
+        error "  sudo ./backup-manager.sh --yes install"
         return 1
     fi
 
     # Get the SSH private key (requires sudo to read portainer user files)
     SSH_PRIVATE_KEY=$(sudo cat "$SSH_KEY_PATH" | base64 -w 0)
     info "SSH private key extracted and encoded"
-    
-    # Generate the self-contained script in a writable location
-    OUTPUT_SCRIPT="/tmp/nas-backup-client.sh"
+
+    # Generate the self-contained script directly in current directory
+    # (avoid /tmp permission issues when running via su)
+    OUTPUT_SCRIPT="./nas-backup-client-temp.sh"
     info "Generating self-contained script: $OUTPUT_SCRIPT"
     
     cat > "$OUTPUT_SCRIPT" << 'EOF'
@@ -5874,51 +5781,53 @@ EOF
     
     # Make executable
     chmod +x "$OUTPUT_SCRIPT"
-    
-    # Copy to current directory if possible (for convenience)
+
+    # Rename temp file to final name
     local final_script="./nas-backup-client.sh"
-    if cp "$OUTPUT_SCRIPT" "$final_script" 2>/dev/null; then
+    if mv "$OUTPUT_SCRIPT" "$final_script" 2>/dev/null; then
         chmod +x "$final_script"
         success "Self-contained NAS backup script generated: $final_script"
         OUTPUT_SCRIPT="$final_script"  # Update for usage instructions
     else
-        warn "Could not copy to current directory, script available at: $OUTPUT_SCRIPT"
+        warn "Could not rename to final name, script available at: $OUTPUT_SCRIPT"
     fi
     
+
     echo
-    echo "============================================================"
-    echo "📋 Usage Instructions"
-    echo "============================================================"
+    printf "%b\n" "${BLUE}============================================================${NC}"
+    printf "%b\n" "${BLUE}📋 Usage Instructions${NC}"
+    printf "%b\n" "${BLUE}============================================================${NC}"
     echo
-    
-    info "The generated script is completely self-contained:"
+
+    printf "%b\n" "${GREEN}The generated script is completely self-contained:${NC}"
     echo "  ✅ Contains embedded SSH private key"
     echo "  ✅ No additional setup required on remote machine"
     echo "  ✅ No portainer user needed on NAS"
     echo "  ✅ Configurable backup path in script header"
     echo
-    
-    info "Copy $OUTPUT_SCRIPT to your NAS and run:"
+
+    printf "%b\n" "${GREEN}Copy $OUTPUT_SCRIPT to your NAS and run:${NC}"
     echo "  # Test connection:"
-    echo "  ./$OUTPUT_SCRIPT test"
+    echo "  $OUTPUT_SCRIPT test"
     echo
     echo "  # List available backups:"
-    echo "  ./$OUTPUT_SCRIPT list"
+    echo "  $OUTPUT_SCRIPT list"
     echo
     echo "  # Sync backups:"
-    echo "  ./$OUTPUT_SCRIPT sync"
+    echo "  $OUTPUT_SCRIPT sync"
     echo
     echo "  # Show statistics:"
-    echo "  ./$OUTPUT_SCRIPT stats"
+    echo "  $OUTPUT_SCRIPT stats"
     echo
-    
-    info "To customize for your NAS:"
+
+    printf "%b\n" "${GREEN}To customize for your NAS:${NC}"
     echo "  1. Edit LOCAL_BACKUP_PATH in the script (currently: /volume1/backup/zuptalo)"
     echo "  2. Adjust RETENTION_DAYS if needed (currently: 30)"
     echo "  3. Schedule with cron or DSM Task Scheduler"
     echo
-    
+
     success "Setup complete! Your NAS backup client is ready."
+    echo
 }
 
 # Check internet connectivity to GitHub
@@ -6165,7 +6074,7 @@ update_script() {
             read -p "Select option [1-4]: " update_choice
         else
             echo "System script not found. Only current script can be updated."
-            echo "Run 'setup' first to install the system script for full functionality."
+            echo "Run 'install' first to install the system script for full functionality."
             echo
             echo "Available options:"
             echo "1) Update current script only ($(realpath "$0"))"
@@ -6201,7 +6110,7 @@ update_script() {
                 fi
             else
                 warn "System script not found at /opt/backup/backup-manager.sh"
-                warn "Run setup first to install system script"
+                warn "Run install first to install system script"
                 rm -f "$temp_file"
                 return 1
             fi
@@ -6261,6 +6170,47 @@ update_script() {
 
 # Uninstall system - complete cleanup with double confirmation
 uninstall_system() {
+    # Check if there's actually an installation to uninstall
+    local has_config=false
+    local has_user=false
+    local has_docker=false
+    local has_containers=false
+
+    # Check for config file
+    if [[ -f "$CONFIG_FILE" ]]; then
+        has_config=true
+    fi
+
+    # Check for portainer user
+    if id "$DEFAULT_PORTAINER_USER" >/dev/null 2>&1; then
+        has_user=true
+    fi
+
+    # Check for Docker and containers
+    if command -v docker >/dev/null 2>&1; then
+        has_docker=true
+        if docker ps -a --format "{{.Names}}" 2>/dev/null | grep -qE "portainer|nginx-proxy-manager"; then
+            has_containers=true
+        fi
+    fi
+
+    # If nothing is installed, inform the user and exit
+    if [[ "$has_config" == "false" ]] && [[ "$has_user" == "false" ]] && [[ "$has_containers" == "false" ]]; then
+        echo
+        printf "%b\n" "${GREEN}ℹ️  No existing installation found${NC}"
+        echo
+        info "Nothing to uninstall - the system is not currently installed."
+        echo
+        info "Installation indicators checked:"
+        printf "  • Config file (%s): Not found\n" "$CONFIG_FILE"
+        printf "  • System user (%s): Not found\n" "$DEFAULT_PORTAINER_USER"
+        printf "  • Docker containers: Not found\n"
+        echo
+        info "To install the system, run: $0 install"
+        echo
+        return 0
+    fi
+
     printf "%b\n" "${RED}⚠️  DESTRUCTIVE OPERATION WARNING${NC}"
     echo "════════════════════════════════════════════════════════════════"
     echo
@@ -6400,7 +6350,7 @@ uninstall_system() {
     printf "%b\n" "${BLUE}💡 Next steps:${NC}"
     echo "  • Docker is still installed and ready for fresh setup"
     echo "  • Docker images have been preserved for faster reinstalls"
-    echo "  • Run './backup-manager.sh setup' to reinstall the system"
+    echo "  • Run './backup-manager.sh install' to reinstall the system"
     echo "  • A new 'portainer' system user will be created during setup"
     echo
     if [[ -d "/opt/backup" ]]; then
@@ -6413,99 +6363,50 @@ uninstall_system() {
 # Show usage information
 usage() {
     printf "%b" "$(cat << EOF
-Docker Backup Manager v${VERSION}
+${BLUE}Docker Backup Manager v${VERSION}${NC}
 
-Usage: $0 [FLAGS] {setup|config|backup|restore|schedule|generate-nas-script|update|uninstall|version}
+${YELLOW}Usage:${NC} $0 [FLAGS] <command>
+
+${BLUE}═══ QUICK START (3 steps) ═══${NC}
+  1. ${GREEN}$0 install${NC}    # Install Docker + Portainer + NPM
+  2. ${GREEN}$0 backup${NC}     # Create your first backup
+  3. ${GREEN}$0 schedule${NC}   # Setup automated backups
+
+${BLUE}═══ COMMANDS ═══${NC}
+  ${GREEN}install${NC}              Install Docker stack (detects existing installation)
+  ${GREEN}backup${NC}               Create backup of all data
+  ${GREEN}restore${NC}              Restore from backup (interactive)
+  ${GREEN}schedule${NC}             Setup cron job for automated backups
+  ${GREEN}generate-nas-script${NC}  Create self-contained NAS backup client
+  ${GREEN}update${NC}               Update to latest version from GitHub
+  ${GREEN}uninstall${NC}            Complete system removal
+  ${GREEN}version${NC}              Show version information
 
 ${BLUE}═══ FLAGS ═══${NC}
-    ${BLUE}--yes, -y${NC}               # Auto-answer 'yes' to all prompts
-    ${BLUE}--non-interactive, -n${NC}   # Run in non-interactive mode (use defaults)
-    ${BLUE}--quiet, -q${NC}             # Minimize output
-    ${BLUE}--verbose${NC}               # Show detailed operation progress
-    ${BLUE}--config-file=PATH${NC}      # Load configuration from file
-    ${BLUE}--timeout=SECONDS${NC}       # Set prompt timeout (default: 60)
-    ${BLUE}--help, -h${NC}              # Show this help message
+  ${GREEN}--yes, -y${NC}            Auto-answer 'yes' to prompts
+  ${GREEN}--non-interactive, -n${NC} Use defaults (no prompts)
+  ${GREEN}--help, -h${NC}           Show this help
 
-${BLUE}═══ WORKFLOW COMMANDS (in recommended order) ═══${NC}
-    ${BLUE}setup${NC}               - 🚀 Initial setup (install Docker, create user, deploy services)
-    ${BLUE}config${NC}              - ⚙️  Interactive configuration (modify settings)
-    
-    ${BLUE}backup${NC}              - 💾 Create backup of all data
-    ${BLUE}restore${NC}             - 🔄 Restore from backup (interactive selection)
-    ${BLUE}schedule${NC}            - ⏰ Setup automated backups
-    ${BLUE}generate-nas-script${NC} - 📡 Generate self-contained NAS backup script
-    
-    ${BLUE}update${NC}              - 🔄 Update script to latest version from GitHub
-    ${BLUE}version${NC}             - 📋 Show version and system information
-    ${BLUE}uninstall${NC}           - 🗑️  Complete system cleanup (destructive operation)
+${BLUE}═══ EXAMPLES ═══${NC}
+  ${YELLOW}# Interactive installation${NC}
+  $0 install
 
-${BLUE}═══ GETTING STARTED ═══${NC}
-    ${BLUE}$0 setup${NC}               # 🚀 First-time setup (run this first!)
-    ${BLUE}$0 config${NC}              # ⚙️  Configure or reconfigure settings
-    
-${BLUE}═══ DAILY OPERATIONS ═══${NC}
-    ${BLUE}$0 backup${NC}              # 💾 Create backup now
-    ${BLUE}$0 restore${NC}             # 🔄 Choose and restore backup
-    ${BLUE}$0 schedule${NC}            # ⏰ Setup cron job for backups
-    
-${BLUE}═══ ADVANCED FEATURES ═══${NC}
-    ${BLUE}$0 generate-nas-script${NC} # 📡 Create NAS backup client script
-    ${BLUE}$0 update${NC}              # 🔄 Update to latest version
+  ${YELLOW}# Automated installation${NC}
+  $0 --yes --non-interactive install
 
-${BLUE}═══ NON-INTERACTIVE USAGE ═══${NC}
-    ${BLUE}$0 --non-interactive --yes setup${NC}
-    ${BLUE}$0 --config-file=/path/to/config.conf setup${NC}
+  ${YELLOW}# Daily operations${NC}
+  $0 backup                 # Manual backup
+  $0 restore                # Restore from backup
 
-    ${YELLOW}Example config file (/etc/docker-backup-manager.conf):${NC}
-    ${GREEN}DOMAIN_NAME="example.com"${NC}
-    ${GREEN}PORTAINER_SUBDOMAIN="pt"${NC}
-    ${GREEN}NPM_SUBDOMAIN="npm"${NC}
-    ${GREEN}PORTAINER_PATH="/opt/portainer"${NC}
-    ${GREEN}TOOLS_PATH="/opt/tools"${NC}
-    ${GREEN}BACKUP_PATH="/opt/backup"${NC}
-    ${GREEN}BACKUP_RETENTION=7${NC}
+  ${YELLOW}# Modify settings${NC}
+  sudo nano /etc/docker-backup-manager.conf
 
-${BLUE}═══ DOCUMENTATION & SUPPORT ═══${NC}
-    ${BLUE}GitHub Repository:${NC} https://github.com/zuptalo/docker-stack-backup
-    ${BLUE}Documentation:${NC}     https://github.com/zuptalo/docker-stack-backup/blob/main/README.md
-    ${BLUE}Issues & Support:${NC}  https://github.com/zuptalo/docker-stack-backup/issues
-    ${BLUE}Latest Releases:${NC}   https://github.com/zuptalo/docker-stack-backup/releases
-
-${BLUE}═══ QUICK START GUIDE ═══${NC}
-    ${YELLOW}New Installation:${NC}
-    1. ${BLUE}$0 setup${NC}                    # Complete infrastructure deployment
-    2. ${BLUE}$0 backup${NC}                   # Create your first backup
-    3. ${BLUE}$0 schedule${NC}                 # Setup automated backups
-    
-    ${YELLOW}Daily Operations:${NC}
-    • ${BLUE}$0 backup${NC}                    # Manual backup creation
-    • ${BLUE}$0 restore${NC}                   # Interactive restore from backup
-    • ${BLUE}$0 generate-nas-script${NC}       # Create NAS backup client
-    
-    ${YELLOW}Maintenance:${NC}
-    • ${BLUE}$0 config${NC}                    # Modify configuration
-    • ${BLUE}$0 update${NC}                    # Update to latest version
-
-${BLUE}═══ COMMON SCENARIOS ═══${NC}
-    ${YELLOW}Disaster Recovery:${NC}
-    ${GREEN}$0 setup${NC}                      # Deploy fresh system
-    ${GREEN}$0 restore${NC}                    # Restore from backup
-    
-    ${YELLOW}Server Migration:${NC}
-    ${GREEN}$0 backup${NC}                     # Create backup on old server
-    ${GREEN}# Copy backup file to new server${NC}
-    ${GREEN}$0 setup${NC}                      # Setup new server
-    ${GREEN}$0 restore${NC}                    # Restore data
-    
-    ${YELLOW}Automation/CI:${NC}
-    ${GREEN}$0 --yes --non-interactive backup${NC}
-    ${GREEN}$0 --config-file=./config.conf setup${NC}
-
-${YELLOW}💡 Note: Run 'setup' first if this is a new installation${NC}
-${YELLOW}📖 For detailed documentation, visit the GitHub repository${NC}
+${BLUE}═══ MORE INFO ═══${NC}
+  ${GREEN}Command help:${NC}  $0 <command> --help
 
 EOF
 )"
+    echo
 }
 
 
@@ -6514,15 +6415,16 @@ show_command_help() {
     local command="$1"
     
     case "$command" in
-        setup)
+        install)
             printf "%b" "$(cat << EOF
-Docker Backup Manager v${VERSION} - Setup Command Help
+Docker Backup Manager v${VERSION} - Install Command Help
 
-${BLUE}COMMAND:${NC} setup
-${BLUE}PURPOSE:${NC} Complete initial setup of Docker Stack Backup Manager
+${BLUE}COMMAND:${NC} install
+${BLUE}PURPOSE:${NC} Install Docker Stack Backup Manager on your system
 
 ${BLUE}DESCRIPTION:${NC}
-This command performs a complete setup of your Docker environment with:
+This command performs a complete installation of your Docker environment with:
+- Existing installation detection (prevents accidental overwrites)
 - Docker and Docker Compose installation
 - Portainer container management platform deployment
 - nginx-proxy-manager reverse proxy with SSL automation
@@ -6530,37 +6432,51 @@ This command performs a complete setup of your Docker environment with:
 - Network and directory structure setup
 
 ${BLUE}USAGE:${NC}
-    $0 [FLAGS] setup
-    
+    $0 [FLAGS] install
+
 ${BLUE}EXAMPLES:${NC}
-    $0 setup                           # Interactive setup
-    $0 --yes setup                     # Auto-confirm all prompts
-    $0 --config-file=/path/config setup   # Use configuration file
-    $0 --non-interactive --yes setup  # Fully automated setup
+    $0 install                           # Interactive installation
+    $0 --yes install                     # Auto-confirm all prompts
+    $0 --non-interactive --yes install  # Fully automated installation
 
 ${BLUE}REQUIREMENTS:${NC}
     • Ubuntu 24.04 LTS (recommended) or compatible Linux distribution
     • User with sudo privileges
     • Internet connection for package downloads
     • Domain name pointing to server IP (for SSL certificates)
-    
+
+${BLUE}INSTALLATION DETECTION:${NC}
+    The install command automatically detects existing installations by checking for:
+    • Configuration file at /etc/docker-backup-manager.conf
+    • System user 'portainer'
+    • Running Docker containers
+
+    If found, installation stops with instructions to uninstall first.
+
 ${BLUE}TROUBLESHOOTING:${NC}
+    ${YELLOW}❌ "Existing installation detected"${NC}
+        → Review current setup: cat /etc/docker-backup-manager.conf
+        → Back up data: $0 backup
+        → Uninstall: $0 uninstall
+        → Then run: $0 install
+
     ${YELLOW}❌ "Docker installation failed"${NC}
         → Check internet connection
         → Verify Ubuntu version compatibility: lsb_release -a
         → Try: sudo apt update && sudo apt upgrade
-        
+
     ${YELLOW}❌ "SSL certificate creation failed"${NC}
         → Verify domain DNS points to server IP: dig yourdomain.com
         → Check ports 80, 443 are accessible
-        → Use --skip-ssl for HTTP-only setup during testing
-        
+        → Continue with HTTP-only if needed
+
     ${YELLOW}❌ "Portainer deployment failed"${NC}
         → Check Docker daemon: sudo systemctl status docker
         → Verify available disk space: df -h
         → Check for port conflicts: sudo netstat -tulpn | grep :9000
 
-${YELLOW}💡 TIP: Setup creates configuration file at /etc/docker-backup-manager.conf${NC}
+${YELLOW}💡 TIP: Install creates configuration file at /etc/docker-backup-manager.conf${NC}
+${YELLOW}⚙️  TIP: Modify settings by editing /etc/docker-backup-manager.conf${NC}
 
 EOF
 )"
@@ -6612,7 +6528,7 @@ ${BLUE}TROUBLESHOOTING:${NC}
     ${YELLOW}❌ "Portainer API authentication failed"${NC}
         → Verify Portainer is running: docker ps | grep portainer
         → Check credentials file: /opt/portainer/.credentials
-        → Try: $0 config (to reconfigure)
+        → Verify configuration: cat /etc/docker-backup-manager.conf
         
     ${YELLOW}❌ "Container stop timeout"${NC}
         → Some containers may be unresponsive
@@ -6663,7 +6579,7 @@ ${BLUE}BACKUP SELECTION:${NC}
 ${BLUE}TROUBLESHOOTING:${NC}
     ${YELLOW}❌ "No backups found"${NC}
         → Check backup directory: ls -la /opt/backup/
-        → Verify backup path in config: $0 config
+        → Verify backup path in config: cat /etc/docker-backup-manager.conf
         → Create backup first: $0 backup
         
     ${YELLOW}❌ "Permission denied during restore"${NC}
@@ -6674,7 +6590,7 @@ ${BLUE}TROUBLESHOOTING:${NC}
     ${YELLOW}❌ "Services failed to start after restore"${NC}
         → Check Docker daemon: sudo systemctl status docker
         → Verify container logs: docker logs <container-name>
-        → Try manual restart: $0 config
+        → Check service status: docker ps -a
         
     ${YELLOW}❌ "Architecture mismatch warning"${NC}
         → Backup was created on different CPU architecture
@@ -6753,62 +6669,6 @@ ${YELLOW}💡 TIP: Scheduled backups run as portainer user and log to /var/log/d
 EOF
 )"
             ;;
-        config)
-            printf "%b" "$(cat << EOF
-Docker Backup Manager v${VERSION} - Config Command Help
-
-${BLUE}COMMAND:${NC} config
-${BLUE}PURPOSE:${NC} Interactive configuration management
-
-${BLUE}DESCRIPTION:${NC}
-Manage Docker Backup Manager configuration:
-- Modify domain and subdomain settings
-- Change backup paths and retention policies
-- Update service configurations
-- Repair SSH keys for NAS backup functionality
-
-${BLUE}USAGE:${NC}
-    $0 [FLAGS] config
-    
-${BLUE}EXAMPLES:${NC}
-    $0 config                     # Interactive configuration
-    $0 --config-file=/path config # Load from specific config file
-
-${BLUE}CONFIGURATION OPTIONS:${NC}
-    • Domain and subdomain settings
-    • Directory paths (Portainer, tools, backups)
-    • Backup retention policies
-    • SSL certificate preferences
-    • NAS backup settings
-
-${BLUE}SSH KEY MANAGEMENT:${NC}
-    • Automatically validates SSH setup
-    • Repairs keys if validation fails
-    • Required for NAS backup functionality
-    • Uses Ed25519 keys for security
-    
-${BLUE}TROUBLESHOOTING:${NC}
-    ${YELLOW}❌ "Configuration file not found"${NC}
-        → Run setup first: $0 setup
-        → Check file exists: ls -la /etc/docker-backup-manager.conf
-        → Create manually or re-run setup
-
-    ${YELLOW}❌ "SSH key validation failed"${NC}
-        → Allow repair when prompted
-        → Check SSH directory permissions: ls -la ~/.ssh/
-        → Verify key files: ls -la /home/portainer/.ssh/
-        
-    ${YELLOW}❌ "Service restart failed after config"${NC}
-        → Check Docker daemon: sudo systemctl status docker
-        → Verify new paths are accessible
-        → Review container logs: docker logs <container>
-        → Consider rollback: $0 restore
-
-${YELLOW}💡 TIP: Config changes are backed up automatically before applying${NC}
-
-EOF
-)"
-            ;;
         generate-nas-script)
             printf "%b" "$(cat << EOF
 Docker Backup Manager v${VERSION} - Generate NAS Script Help
@@ -6854,8 +6714,8 @@ ${BLUE}DEPLOYMENT:${NC}
 ${BLUE}TROUBLESHOOTING:${NC}
     ${YELLOW}❌ "SSH key generation failed"${NC}
         → Check SSH directory: ls -la /home/portainer/.ssh/
-        → Repair SSH setup: $0 config
         → Verify portainer user exists
+        → Check SSH key permissions
         
     ${YELLOW}❌ "Cannot connect to primary server"${NC}
         → Verify primary server SSH access
@@ -7054,6 +6914,7 @@ EOF
             printf "Use '$0 --help' to see all available commands\n"
             ;;
     esac
+    echo
 }
 
 # Main function dispatcher
@@ -7064,7 +6925,7 @@ main() {
     
     # First pass: check if we have a command followed by --help
     for arg in "$@"; do
-        if [[ "$arg" =~ ^(setup|backup|restore|schedule|config|generate-nas-script|update|uninstall|version)$ ]]; then
+        if [[ "$arg" =~ ^(install|backup|restore|schedule|generate-nas-script|update|uninstall|version)$ ]]; then
             has_command=true
             break
         fi
@@ -7096,16 +6957,6 @@ main() {
                 PROMPT_TIMEOUT="$2"
                 shift 2
                 ;;
-            --config-file=*)
-                CONFIG_FILE="${1#*=}"
-                USER_SPECIFIED_CONFIG_FILE=true
-                shift
-                ;;
-            --config-file)
-                CONFIG_FILE="$2"
-                USER_SPECIFIED_CONFIG_FILE=true
-                shift 2
-                ;;
             --help|-h)
                 # If we have a command, let command-specific help handle it
                 if [[ "$has_command" == "true" ]]; then
@@ -7128,21 +6979,7 @@ main() {
                 ;;
         esac
     done
-    
-    # Validate config file early if explicitly specified by user
-    if [[ "$USER_SPECIFIED_CONFIG_FILE" == "true" && -n "$CONFIG_FILE" ]]; then
-        if [[ ! -f "$CONFIG_FILE" ]]; then
-            error "Configuration file not found: $CONFIG_FILE"
-            exit 1
-        fi
-        
-        # Validate syntax early to catch errors before processing
-        if ! bash -n "$CONFIG_FILE" 2>/dev/null; then
-            error "Configuration file has syntax errors: $CONFIG_FILE"
-            exit 1
-        fi
-    fi
-    
+
     # Check root after flag parsing (help should work even as root)
     check_root
     
@@ -7161,45 +6998,57 @@ main() {
     fi
     
     case "$command" in
-        setup)
+        install)
             if [[ "$help_requested" == "true" ]]; then
-                show_command_help "setup"
+                show_command_help "install"
                 exit 0
             fi
+
+            # Check for existing installation first
+            if ! check_existing_installation; then
+                exit 1
+            fi
+
             # Create operation lock and recovery info
-            create_operation_lock "setup" || exit 1
-            create_recovery_info "setup"
-            
-            # Setup doesn't need to load config - it creates it
+            create_operation_lock "install" || exit 1
+            create_recovery_info "install"
+
+            # Install doesn't need to load config - it creates it
             install_dependencies
-            setup_fixed_configuration
+            collect_installation_config
             verify_dns_and_ssl
             install_docker
             create_portainer_user
             create_directories
             create_docker_network
-            prepare_nginx_proxy_manager_files
-            deploy_portainer
+
+            # Generate secure random password for initial admin accounts
+            info "Generating secure random password for admin accounts..."
+            ADMIN_PASSWORD=$(generate_random_password 20)
+            success "Generated secure password for Portainer and nginx-proxy-manager"
+
+            prepare_nginx_proxy_manager_files "$ADMIN_PASSWORD"
+            deploy_portainer "$ADMIN_PASSWORD"
             # NPM must be deployed as a Portainer stack - no fallback
             info "nginx-proxy-manager will be configured after Portainer stack deployment"
-            
+
             # Configure nginx-proxy-manager proxy hosts
-            configure_nginx_proxy_manager
-            
+            configure_nginx_proxy_manager "$ADMIN_PASSWORD"
+
             # Validate SSH setup for NAS backup functionality
             if validate_ssh_setup; then
                 success "SSH key validation passed - NAS backup functionality ready"
             else
                 warn "SSH key validation failed - NAS backup functionality may not work properly"
             fi
-            
+
             # Validate system state after setup
             if validate_system_state "setup"; then
-                success "Setup completed successfully!"
+                success "Installation completed successfully!"
                 echo
                 printf "%b\n" "${BLUE}🎉 Docker Stack Backup Manager is Ready!${NC}"
             else
-                error "Setup completed but system validation failed"
+                error "Installation completed but system validation failed"
                 error "Some components may not be working correctly"
                 error "Check recovery information and logs for troubleshooting"
                 exit 1
@@ -7207,10 +7056,10 @@ main() {
             echo "═══════════════════════════════════════════════════════════════"
             echo
             printf "%b\n" "${BLUE}📱 Service Access URLs:${NC}"
-            
+
             # Show Portainer URL
             if ! is_test_environment && [[ "${SKIP_SSL_CERTIFICATES:-false}" != "true" ]]; then
-                printf "  • Portainer:              %b\n" "${GREEN}${PORTAINER_URL:-"portainer.domain.com"}${NC}"
+                printf "  • Portainer:              %b\n" "${GREEN}https://${PORTAINER_URL:-"portainer.domain.com"}${NC}"
             else
                 if is_test_environment; then
                     printf "  • Portainer:              %b\n" "${GREEN}http://localhost:9000${NC} (test environment)"
@@ -7218,7 +7067,7 @@ main() {
                     printf "  • Portainer:              %b\n" "${YELLOW}http://${PORTAINER_URL#https://}${NC} (configure DNS for HTTPS)"
                 fi
             fi
-            
+
             # Show nginx-proxy-manager URL
             if ! is_test_environment && [[ "${SKIP_SSL_CERTIFICATES:-false}" != "true" ]]; then
                 printf "  • nginx-proxy-manager:    %b\n" "${GREEN}https://${NPM_URL:-"npm.domain.com"}${NC}"
@@ -7229,11 +7078,30 @@ main() {
                     printf "  • nginx-proxy-manager:    %b\n" "${YELLOW}http://${NPM_URL:-"npm.domain.com"}${NC} (configure DNS for HTTPS)"
                 fi
             fi
-            
+
             echo
-            printf "%b\n" "${BLUE}🔑 Login Credentials (for both services):${NC}"
+            printf "%b\n" "${BLUE}🔑 Login Credentials:${NC}"
             printf "  • Username: %b\n" "${GREEN}admin@${DOMAIN_NAME}${NC}"
-            printf "  • Password: %b\n" "${GREEN}AdminPassword123!${NC}"
+            printf "  • Password: %b\n" "${GREEN}${ADMIN_PASSWORD}${NC}"
+            echo
+            printf "%b\n" "${YELLOW}  ⚠️  IMPORTANT - Save this password securely!${NC}"
+            printf "%b\n" "${YELLOW}     • This randomly generated password is used for both Portainer and nginx-proxy-manager${NC}"
+            printf "%b\n" "${YELLOW}     • Portainer credentials are stored in: ${PORTAINER_PATH}/.credentials${NC}"
+            printf "%b\n" "${YELLOW}     • If you change the Portainer password, update the .credentials file manually${NC}"
+            printf "%b\n" "${YELLOW}     • NPM credentials are only needed for initial configuration${NC}"
+            echo
+            printf "%b\n" "${BLUE}📁 Installation Locations:${NC}"
+            printf "  • Config file:    %b\n" "${GREEN}${CONFIG_FILE}${NC}"
+            printf "  • Portainer:      %b\n" "${GREEN}${PORTAINER_PATH}${NC}"
+            printf "  • NPM:            %b\n" "${GREEN}${NPM_PATH}${NC}"
+            printf "  • Tools:          %b\n" "${GREEN}${TOOLS_PATH}${NC}"
+            printf "  • Backups:        %b\n" "${GREEN}${BACKUP_PATH}${NC}"
+            printf "  • Credentials:    %b\n" "${GREEN}${PORTAINER_PATH}/.credentials${NC}"
+            echo
+            printf "%b\n" "${BLUE}⚙️  To modify settings:${NC}"
+            echo "  • Edit config: sudo nano ${CONFIG_FILE}"
+            echo "  • Change retention: BACKUP_RETENTION=14 REMOTE_RETENTION=60"
+            echo "  • Note: Domain changes require manual NPM proxy host updates"
             echo
             printf "%b\n" "${BLUE}💡 Next Steps:${NC}"
             echo "  1. Access Portainer to manage your Docker stacks"
@@ -7273,30 +7141,6 @@ main() {
             load_config
             check_setup_required "schedule" || return 1
             setup_schedule
-            ;;
-        config)
-            if [[ "$help_requested" == "true" ]]; then
-                show_command_help "config"
-                exit 0
-            fi
-            install_dependencies
-            load_config
-            interactive_setup_configuration
-            
-            # Validate SSH setup after configuration
-            if ! validate_ssh_setup 2>/dev/null; then
-                warn "SSH key validation failed"
-                if prompt_yes_no "Would you like to repair SSH key setup? (required for NAS backup functionality)" "y"; then
-                    setup_ssh_keys
-                    if validate_ssh_setup; then
-                        success "SSH key setup repaired successfully"
-                    else
-                        error "SSH key repair failed - NAS backup functionality may not work"
-                    fi
-                fi
-            else
-                success "SSH key setup is valid"
-            fi
             ;;
         generate-nas-script)
             if [[ "$help_requested" == "true" ]]; then
@@ -7358,7 +7202,7 @@ main() {
         *)
             printf "%b\n" "${RED}❌ Unknown command: $command${NC}"
             echo "💡 Did you mean one of these commands?"
-            echo "   • setup, backup, restore, schedule, config, update, uninstall, version"
+            echo "   • install, backup, restore, schedule, update, uninstall, version"
             echo "   • Use '$0 --help' to see all available commands"
             echo "   • Use '$0 <command> --help' for command-specific help"
             echo
