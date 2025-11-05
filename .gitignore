@@ -7,11 +7,24 @@ test-environment
 # Test backup directory (used when running NAS script locally)
 backup/
 
+# NAS backup storage (test backups)
+nas-backups/
+
+# Backup files
+*.bak
+
 # Generated NAS scripts during testing
 nas-backup-client.sh
 
-# Test backup directory (used when running NAS script locally)
-backup/
+# Test artifacts and temporary files
+tests/**/*.log
+tests/**/*.tmp
+tests/**/test-output-*
+tests/.test-cache/
 
-# Generated NAS scripts during testing
-nas-backup-client.sh
+# Test VM snapshots (managed by Vagrant)
+.vagrant/
+
+# Generated test reports
+test-results/
+test-reports/
