@@ -1,15 +1,9 @@
 # Docker Stack Backup
 
-**Single-script solution for transforming Ubuntu LTS servers into production-ready Docker environments with automated backup/restore capabilities.**
+[![Create Release on Push to Main](https://github.com/zuptalo/docker-stack-backup/actions/workflows/release.yml/badge.svg)](https://github.com/zuptalo/docker-stack-backup/actions/workflows/release.yml)
+[![Latest Release](https://img.shields.io/github/v/release/zuptalo/docker-stack-backup)](https://github.com/zuptalo/docker-stack-backup/releases/latest)
 
----
-
-## 📋 Overview
-
-- **What**: Self-contained bash script (~7400 lines) that manages Docker infrastructure lifecycle
-- **Who**: Individual self-hosters with passwordless sudo access on Ubuntu servers
-- **How**: Zero manual intervention - fully automated setup, backup, restore, and scheduling
-- **Where**: Ubuntu 22.04/24.04 LTS (other versions may work but untested)
+Single-script solution to transform any Ubuntu LTS server into a production-ready Docker environment with automated backup, restore, and management capabilities for self-hosters.
 
 ## 🎯 Project Status
 
@@ -30,7 +24,33 @@
 
 **See [STATUS.md](STATUS.md) for detailed feature tracking.**
 
+## 🚀 Features
+
+- **Complete Infrastructure Setup**: Automatically installs Docker, creates users, and deploys services
+- **nginx-proxy-manager Integration**: Automatic SSL certificate management and reverse proxy
+- **Portainer Management**: Pre-configured with API integration for stack management
+- **Intelligent Backups**: Preserves file permissions, captures stack states, and graceful container handling
+- **Automated Scheduling**: Cron-based backup scheduling with configurable retention
+- **Remote Backup Sync**: Secure SSH-based backup synchronization to remote servers
+- **Interactive Restore**: Select and restore from available backups with automatic stack restart
+- **Self-Contained NAS Scripts**: Generate standalone backup clients with embedded SSH keys
+- **User-Independent**: Works with any setup user (vagrant, ubuntu, admin, etc.)
+- **System-Wide Architecture**: Uses `/opt/backup` for consistent, production-ready deployment
+
 ## 🚀 Quick Start
+
+### Production Deployment
+
+```bash
+# Download latest release
+curl -fsSL https://raw.githubusercontent.com/zuptalo/docker-stack-backup/main/backup-manager.sh -o backup-manager.sh
+chmod +x backup-manager.sh
+
+# Run initial setup
+./backup-manager.sh setup
+```
+
+### Development & Testing
 
 ```bash
 # Clone the repository
@@ -44,103 +64,199 @@ cd docker-stack-backup
 
 # Install (detects existing installations automatically)
 sudo ./backup-manager.sh install
-
-# Create a backup
-sudo ./backup-manager.sh backup
-
-# Restore from backup
-sudo ./backup-manager.sh restore
 ```
-
-## 🏗️ Architecture
-
-### Single-Script Design
-- **All functionality in one file**: `backup-manager.sh`
-- **No external dependencies**: Only standard Ubuntu tools
-- **Self-contained**: Handles installation through operation
-
-### Three-Layer System
-1. **Infrastructure Layer**: `/opt/{portainer,nginx-proxy-manager,tools,backup}`
-2. **Network Layer**: Internal Docker network with nginx reverse proxy
-3. **User/Permission Layer**: Dedicated `portainer` system user
-
-### Key Features
-- **Dual-preservation backup**: tar.gz archives + separate metadata for permissions
-- **Portainer API integration**: Full stack state capture/restore
-- **Graceful operations**: Proper container shutdown/restart sequences
-- **Cross-architecture detection**: Warnings for incompatible restores
-- **Remote NAS backup**: Self-contained SSH-based client script
 
 ## 📚 Documentation Map
 
 - **[README.md](README.md)** ← You are here - Project overview & quick reference
 - **[STATUS.md](STATUS.md)** - Detailed feature implementation status & testing coverage
-- **[CLAUDE.md](CLAUDE.md)** - Claude Code specific instructions & development guidelines
-- **[TESTING.md](TESTING.md)** - Testing infrastructure, procedures, and test writing guide
+- **[tests/TESTING.md](tests/TESTING.md)** - Complete guide to the testing infrastructure, procedures, and writing tests.
 
-## 🧪 Development & Testing
+## 💻 Usage
 
-**IMPORTANT**: All testing runs inside Vagrant VMs, not on host machine.
-
-```bash
-# Start test environment
-vagrant up primary nas
-
-# SSH into primary VM
-vagrant ssh primary
-
-# Run tests
-cd docker-stack-backup
-sudo ./tests/run-tests.sh
-
-# Create/restore snapshots for faster testing
-./tests/snapshot.sh create my-snapshot
-./tests/snapshot.sh restore my-snapshot
-```
-
-See [TESTING.md](TESTING.md) for complete testing guide.
-
-## 📖 Available Commands
+### Backup Operations
 
 ```bash
-./backup-manager.sh install            # Install system (detects existing installations)
-./backup-manager.sh backup             # Create backup
-./backup-manager.sh restore            # Interactive restore
-./backup-manager.sh schedule           # Setup cron jobs
-./backup-manager.sh update             # Self-update from GitHub
-./backup-manager.sh generate-nas-script # Generate NAS backup client
-./backup-manager.sh uninstall          # Complete system cleanup
-./backup-manager.sh --help             # Show all commands
+# Create a backup
+./backup-manager.sh backup
 
-# Modify settings by editing:
-sudo nano /etc/docker-backup-manager.conf
+# List and restore from backups
+./backup-manager.sh restore
+
+# Setup automated backups
+./backup-manager.sh schedule
+
+# Update to latest version
+./backup-manager.sh update
+
+# Reconfigure settings
+./backup-manager.sh config
 ```
 
-## 🔒 Security Considerations
+### NAS Backup Generation
 
-- SSH keys stored in `/opt/backup/.ssh/` (portainer user)
-- Credentials in `.credentials` files (git-ignored)
-- Restricted sudo access for portainer user
-- No external port exposure except 80/443 via nginx-proxy-manager
-- All internal services communicate via Docker network
+```bash
+# Generate self-contained NAS backup script (integrated into main script)
+./backup-manager.sh generate-nas-script
 
-## 🤝 Contributing
+# The generated script is completely self-contained:
+# - Contains embedded SSH private key
+# - No additional setup required on remote machine
+# - No portainer user needed on NAS
+# - Configurable backup path in script header
+```
 
-This project uses AI-assisted development:
-- **Claude Code**: Primary development assistant
-- **Gemini/Other AI CLIs**: Should work with any AI assistant
+### NAS Backup Usage
 
-When starting a new session, AI assistants should read:
-1. README.md (this file) for project overview
-2. STATUS.md for current implementation state
-3. CLAUDE.md for development guidelines
-4. TESTING.md for testing procedures
+```bash
+# On your NAS, test the generated script:
+./nas-backup-client.sh test
 
-## 🔗 Links
+# List available backups:
+./nas-backup-client.sh list
 
-- **GitHub Repository**: https://github.com/zuptalo/docker-stack-backup
-- **Issue Tracker**: https://github.com/zuptalo/docker-stack-backup/issues
+# Sync backups:
+./nas-backup-client.sh sync
 
----
+# Show statistics:
+./nas-backup-client.sh stats
+```
 
-**Design Philosophy**: Safety First | Fully Automated | Production Ready | Self-Contained
+## 🏗️ Architecture
+
+### Network Setup
+- **prod-network**: External Docker network for all services
+- **nginx-proxy-manager**: Entry point (ports 80, 443, 81)
+- **Portainer**: Management interface (internal port 9000)
+- **User Stacks**: All deployed via Portainer on prod-network
+
+### File Structure
+```
+/opt/portainer/              # Portainer data and config
+├── docker-compose.yml
+├── .credentials
+└── data/
+
+/opt/tools/                  # Other services data
+├── nginx-proxy-manager/
+│   ├── docker-compose.yml
+│   ├── .credentials
+│   ├── data/
+│   └── letsencrypt/
+└── [other-services]/
+
+/opt/backup/                # Backup storage (system-wide)
+├── backup-manager.sh    # System script location
+├── docker_backup_YYYYMMDD_HHMMSS.tar.gz
+└── ...
+```
+
+## 🔒 Security Features
+
+### User Management
+- Dedicated `portainer` system user for all operations
+- SSH key generation with restricted access
+- Proper file permissions and ownership
+- System-wide script deployment at `/opt/backup/backup-manager.sh`
+
+### Backup Security
+- File permissions and ownership preservation
+- Secure credential storage
+- Graceful container shutdown for data consistency
+
+### Remote Access
+- SSH key-based authentication
+- Self-contained backup scripts with embedded keys
+- Configurable retention policies
+
+## 🔄 Backup Process
+
+1. **Pre-backup**: Capture running stack states via Portainer API
+2. **Graceful Shutdown**: Stop all containers except Portainer
+3. **Create Archive**: tar.gz with preserved permissions/ownership
+4. **Restart Services**: nginx-proxy-manager first, then other stacks
+5. **Cleanup**: Manage retention policy (default: 7 local, 30 remote)
+
+## 🔧 Restore Process
+
+1. **Interactive Selection**: Choose from available backups
+2. **Safety Backup**: Create backup of current state
+3. **Graceful Shutdown**: Stop all containers
+4. **Extract Data**: Restore files with original permissions
+5. **Service Restart**: Bring services back online
+6. **Stack Recovery**: Restart only previously running stacks
+
+## 📝 Configuration Files
+
+### Main Configuration
+- `/etc/backup-manager.conf`: Main script settings
+
+### Service Credentials
+- `/opt/portainer/.credentials`: Portainer admin credentials
+- `/opt/tools/nginx-proxy-manager/.credentials`: NPM admin credentials
+
+## 📊 Logs
+
+- `/var/log/backup-manager.log`: Main script logs
+
+## 🧪 Testing Environment
+
+The project includes a comprehensive Vagrant-based testing environment that provides **enterprise-grade testing** in a **realistic environment**. See [tests/TESTING.md](tests/TESTING.md) for a complete guide.
+
+## 📋 Requirements
+
+### System Requirements
+- Ubuntu 24.04 LTS (recommended)
+- User with sudo privileges
+- Internet connection for package downloads
+
+### Network Requirements
+- Domain pointing to server IP (for SSL certificates)
+- Ports 80, 443 open for nginx-proxy-manager
+- Port 81 open for nginx-proxy-manager admin (optional)
+
+### Remote Backup Requirements
+- SSH access to remote server (NAS)
+- Remote server with sufficient storage
+- SSH key authentication configured (automatic with generated scripts)
+
+## 🔧 Troubleshooting
+
+### Check Service Status
+```bash
+docker ps
+docker logs nginx-proxy-manager
+docker logs portainer
+```
+
+### Verify Network
+```bash
+docker network ls
+docker network inspect prod-network
+```
+
+### Check Logs
+```bash
+tail -f /var/log/backup-manager.log
+```
+
+## 🤝 Contributing & Community
+
+This project started as a personal hobby project to solve my own Docker backup needs, and I'm sharing it openly for others who might find it useful. While I've put effort into testing and documentation, please understand this comes with typical hobby project caveats.
+
+### 🔧 Use at Your Own Risk
+- Test thoroughly in your environment before production use
+- No warranty or guarantees provided - this is hobby code shared freely
+- Evaluate and adapt to your specific needs and requirements
+- Always backup your data before trying new backup tools! 😉
+
+### 🌟 Contributions Welcome!
+- 🐛 **Bug reports** - Found an issue? Please open an issue with details!
+- 💡 **Feature suggestions** - Have ideas? Let's discuss them in discussions!
+- 🔀 **Pull requests** - Improvements, fixes, and new features are always welcome!
+
+**💬 Questions or Ideas?** Start a [Discussion](https://github.com/zuptalo/docker-stack-backup/discussions) - I'd love to hear how you're using this tool and what improvements would help you most.
+
+## 📄 License
+
+This project is open source and available under the MIT License.
